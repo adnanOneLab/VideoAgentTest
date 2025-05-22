@@ -32,16 +32,16 @@ aws_credentials.json
 credentials.json
 
 # Project specific
-unrecognized_faces/
-indexed_faces/
-collection_backups/
-collection_exports/
-face_mapping.json
-face_recognition_history.json
-person_settings.json
-performance_plots/
-output_videos/
-video_reports/
+# unrecognized_faces/
+# indexed_faces/
+# collection_backups/
+# collection_exports/
+# face_mapping.json
+# face_recognition_history.json
+# person_settings.json
+# performance_plots/
+# output_videos/
+# video_reports/
 
 # IDE specific
 .idea/

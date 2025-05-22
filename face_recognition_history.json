@@ -1,0 +1,20 @@
+{
+  "daily_stats": {
+    "2025-05-20": {
+      "faces_detected": 152,
+      "faces_recognized": 98,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "avg_confidence": 97.95353382512143,
+      "avg_quality": 0
+    },
+    "2025-05-21": {
+      "faces_detected": 152,
+      "faces_recognized": 98,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "avg_confidence": 97.95353382512143,
+      "avg_quality": 0
+    }
+  }
+}
