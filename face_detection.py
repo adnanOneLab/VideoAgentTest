@@ -454,9 +454,11 @@ class VideoAnalyzer:
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
 
+
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"Could not open video file: {video_path}")
+
 
         # Get video properties
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -840,18 +842,25 @@ class VideoAnalyzer:
     def calculate_iou(self, box1, box2):
         """Calculate Intersection over Union for two bounding boxes"""
         # box format: (left, top, right, bottom) - pixel coordinates
+        # box format: (left, top, right, bottom) - pixel coordinates
         x_left = max(box1[0], box2[0])
         y_top = max(box1[1], box2[1])
         x_right = min(box1[2], box2[2])
         y_bottom = min(box1[3], box2[3])
 
+
         if x_right < x_left or y_bottom < y_top:
             return 0.0
+
 
         intersection_area = (x_right - x_left) * (y_bottom - y_top)
         box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
         box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
         union_area = box1_area + box2_area - intersection_area
+
+        if union_area == 0:
+             return 0.0
+
 
         if union_area == 0:
              return 0.0
@@ -863,6 +872,8 @@ class VideoAnalyzer:
         if frame is None or frame.size == 0:
             return frame
 
+        # height, width = frame.shape[:2] # Not needed if using pixel coordinates from tracking
+
         # Draw tracked faces
         for track_id, track_data in self.tracked_faces.items():
             # Skip unknown faces
@@ -871,6 +882,7 @@ class VideoAnalyzer:
                 
             box = track_data['box']
             left, top, right, bottom = box
+
 
             # Choose color based on recognition status
             if track_data.get('recognized', False):
