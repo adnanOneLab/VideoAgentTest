@@ -1,140 +1,66 @@
-# Facial Recognition Mall System
+# Facial Recognition Tool
 
-A comprehensive facial recognition system designed for mall security and visitor tracking, built with Python and AWS Rekognition.
-
-## Features
-
-- Real-time face detection and recognition
-- AWS Rekognition integration for cloud-based face recognition
-- Local face collection management
-- Video processing capabilities
-- Webcam face capture
-- Duplicate face detection and cleanup
-- Performance tracking and reporting
-- Modern GUI interface
+A facial recognition system that uses AWS Rekognition for face detection and recognition.
 
 ## Prerequisites
 
 - Python 3.8 or higher
 - AWS Account with Rekognition access
-- Webcam (for face capture feature)
-- Sufficient disk space for face storage
+- AWS credentials configured (see Setup section)
 
-## Installation
+## Setup
 
-1. Clone the repository:
-```bash
-git clone https://github.com/yourusername/facial-recognition-mall.git
-cd facial-recognition-mall
-```
-
-2. Create and activate a virtual environment:
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# Linux/Mac
-python3 -m venv venv
-source venv/bin/activate
-```
-
-3. Install dependencies:
+1. Install Python dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-4. Configure AWS credentials:
-   - Create an AWS credentials file at `~/.aws/credentials`
-   - Add your AWS access key and secret key:
-```ini
-[default]
-aws_access_key_id = YOUR_ACCESS_KEY
-aws_secret_access_key = YOUR_SECRET_KEY
-```
+2. Configure AWS credentials:
+   - Create an AWS account if you don't have one
+   - Create an IAM user with Rekognition access
+   - Configure AWS credentials using one of these methods:
+     - AWS CLI: `aws configure`
+     - Environment variables: Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+     - Or create `~/.aws/credentials` file with:
+     ```
+     [default]
+     aws_access_key_id = YOUR_ACCESS_KEY
+     aws_secret_access_key = YOUR_SECRET_KEY
+     ```
 
-## Usage
+3. Create an AWS Rekognition collection:
+   - The application will automatically create a collection named 'my-face-collection'
+   - Or you can create it manually in the AWS Console
 
-1. Start the application:
+## Running the Application
+
+1. Run the main application:
 ```bash
-python face_detection.py
+python src/core/face_detection.py
 ```
 
-2. Main Features:
-   - Process Video (V): Analyze video files for face detection
-   - Capture Face (C): Capture faces from webcam
-   - Register Faces (R): Register multiple faces from a folder
-   - Show Collection (S): View and manage face collection
-   - Cleanup Duplicates (D): Find and remove duplicate faces
-   - Index Faces (I): Review and index unrecognized faces
+2. Using the GUI:
+   - Press 'C' to capture faces from webcam
+   - Press 'V' to process a video file
+   - Press 'R' to register faces from a folder
+   - Press 'S' to show/manage the face collection
+   - Press 'Q' to quit
 
-## Project Structure
+## Features
 
-```
-facial-recognition-mall/
-├── face_detection.py      # Main application file
-├── requirements.txt       # Python dependencies
-├── .gitignore            # Git ignore rules
-├── README.md             # Project documentation
-├── unrecognized_faces/   # Directory for new faces
-├── indexed_faces/        # Directory for registered faces
-├── collection_backups/   # Collection backup files
-└── collection_exports/   # Collection export files
-```
+- Face detection and recognition using AWS Rekognition
+- Real-time face quality assessment
+- Face capture from webcam
+- Video processing
+- Face collection management
+- AWS collection synchronization
+- Performance metrics and reporting
 
-## AWS Configuration
+## Directory Structure
 
-1. Create a Rekognition Collection:
-   - Collection ID: 'my-face-collection'
-   - Region: ap-south-1 (or your preferred region)
-
-2. Required AWS Permissions:
-   - rekognition:CreateCollection
-   - rekognition:DeleteCollection
-   - rekognition:IndexFaces
-   - rekognition:DeleteFaces
-   - rekognition:SearchFacesByImage
-   - rekognition:ListFaces
-
-## Collaboration Guidelines
-
-1. Branching Strategy:
-   - `main`: Production-ready code
-   - `develop`: Development branch
-   - Feature branches: `feature/feature-name`
-   - Bug fix branches: `fix/bug-name`
-
-2. Commit Guidelines:
-   - Use clear, descriptive commit messages
-   - Reference issue numbers in commits
-   - Keep commits focused and atomic
-
-3. Pull Request Process:
-   - Create PR from feature/fix branch to develop
-   - Include description of changes
-   - Request review from team members
-   - Ensure all tests pass
-   - Update documentation if needed
-
-## Security Notes
-
-- Never commit AWS credentials
-- Keep face data secure and private
-- Follow local privacy laws and regulations
-- Regular security audits recommended
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Commit your changes
-4. Push to the branch
-5. Create a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For support, please open an issue in the GitHub repository or contact the maintainers. 
+- `src/core/` - Core application code
+- `src/utils/` - Utility functions
+- `indexed_faces/` - Stored face images
+- `unrecognized_faces/` - Temporary storage for unrecognized faces
+- `output/` - Processed video output
+- `performance_plots/` - Generated performance reports 

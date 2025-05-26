@@ -2,17 +2,14 @@ import boto3
 import cv2
 import time
 import os
-import sys  # Add sys import
 import numpy as np
 from datetime import datetime
 import json
 from sklearn.metrics.pairwise import cosine_similarity
-import face_recognition  # You'll need to install this: pip install face_recognition
-import uuid  # Add UUID import
+import face_recognition
+import uuid
 from collections import defaultdict
-import pandas as pd
 import matplotlib.pyplot as plt
-from scipy.spatial import distance
 import shutil
 import zipfile
 import tkinter as tk
@@ -28,9 +25,34 @@ class VideoAnalyzer:
         self.rekognition = boto3.client('rekognition', region_name='ap-south-1')
         self.collection_id = 'my-face-collection'
         
+        # Recognition settings with improved thresholds
+        self.recognition_settings = {
+            'default_threshold': 70,      # Lowered threshold for more matches
+            'min_confidence': 80,         # Lowered minimum confidence for detection
+            'max_faces': 10,             # Keep max faces for better coverage
+            'quality_threshold': 60,      # Lowered quality threshold
+            'tracking_cache_time': 30,    # Number of frames to cache recognized faces
+            'min_tracking_confidence': 75  # Lowered minimum confidence for tracking cache
+        }
+        
+        # Face tracking cache
+        self.tracking_cache = {}  # Format: {face_id: {'name': name, 'confidence': conf, 'frames': count}}
+        
+        # Enhanced preprocessing settings
+        self.preprocessing_settings = {
+            'clahe_clip_limit': 3.0,      # Increased contrast enhancement
+            'clahe_grid_size': (8, 8),
+            'bilateral_d': 9,             # Bilateral filter parameters
+            'bilateral_sigma_color': 75,
+            'bilateral_sigma_space': 75,
+            'sharpen_kernel': np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]),
+            'contrast_alpha': 1.4,        # Increased contrast
+            'contrast_beta': 15           # Increased brightness
+        }
+        
         # Create directories
         self.unrecognized_dir = "unrecognized_faces"
-        self.indexed_dir = "indexed_faces"  # For faces that have been added to collection
+        self.indexed_dir = "indexed_faces"
         os.makedirs(self.unrecognized_dir, exist_ok=True)
         os.makedirs(self.indexed_dir, exist_ok=True)
         
@@ -45,119 +67,62 @@ class VideoAnalyzer:
         self.sync_collection()
         
         # Visualization settings
-        self.face_color = (0, 255, 0)  # Green for face boxes
-        self.unrecognized_color = (0, 165, 255)  # Orange for unrecognized faces
+        self.face_color = (0, 255, 0)
+        self.unrecognized_color = (0, 165, 255)
         self.font = cv2.FONT_HERSHEY_SIMPLEX
         self.font_scale = 0.7
         self.font_thickness = 2
         self.box_thickness = 2
         
         # Processing control
-        self.frame_skip = 3  # Process every 3rd frame for better detection
+        self.frame_skip = 5
         self.frame_counter = 0
-        self.last_results = {
-            'faces': []
-        }
-        self.tracked_faces = {}  # To maintain face tracking between frames
+        self.last_results = {'faces': []}
+        self.tracked_faces = {}
         self.tracking_counter = 0
-        self.total_faces_detected = 0  # Track total faces detected
-        self.recognized_faces = set()  # Track unique recognized faces
-        self.unrecognized_faces = []  # Track unrecognized faces for review
+        self.total_faces_detected = 0
+        self.recognized_faces = set()
+        
+        # Face tracking settings
+        self.tracking_iou_threshold = 0.3
+        self.max_tracking_frames = 30
+        
+        # Quality assessment settings
+        self.quality_metrics = {
+            'blur_threshold': 100,
+            'min_face_size': 100,
+            'max_face_size': 1000,
+            'min_confidence': 90,
+            'max_angle': 30,
+            'min_lighting': 40,
+            'max_lighting': 200
+        }
         
         # Face comparison settings
-        self.face_similarity_threshold = 0.6  # Threshold for considering faces as the same person
-        self.known_face_encodings = {}  # Cache for face encodings
+        self.face_similarity_threshold = 0.6
+        self.known_face_encodings = {}
         
-        # Add new attributes for quality assessment and performance tracking
-        self.quality_metrics = {
-            'blur_threshold': 100,  # Laplacian variance threshold
-            'min_face_size': 100,   # Minimum face size in pixels
-            'max_face_size': 1000,  # Maximum face size in pixels
-            'min_confidence': 90,   # Minimum detection confidence
-            'max_angle': 30,        # Maximum face angle in degrees
-            'min_lighting': 40,     # Minimum average brightness
-            'max_lighting': 200     # Maximum average brightness
-        }
-        
-        # Performance tracking
-        self.performance_metrics = {
-            'total_frames_processed': 0,
-            'total_faces_detected': 0,
-            'total_faces_recognized': 0,
-            'false_positives': 0,
-            'false_negatives': 0,
-            'recognition_times': [],
-            'confidence_scores': [],
-            'quality_scores': []
-        }
-        
-        # Historical data
-        self.historical_data = {
-            'daily_stats': defaultdict(lambda: {
-                'faces_detected': 0,
-                'faces_recognized': 0,
-                'false_positives': 0,
-                'false_negatives': 0,
-                'avg_confidence': 0,
-                'avg_quality': 0
-            })
-        }
-        
-        # Load historical data if exists
+        # Load historical data
         self.load_historical_data()
         
-        # Add new attributes for collection management
-        self.collection_settings = {
-            'backup_dir': 'collection_backups',
-            'export_dir': 'collection_exports',
-            'version': '1.0'
+        # Enhanced tracking settings
+        self.tracking_settings = {
+            'max_tracking_frames': 30,     # Maximum frames to track a face
+            'min_tracking_confidence': 75,  # Minimum confidence to start tracking
+            'iou_threshold': 0.3,          # IOU threshold for matching faces
+            'max_movement': 0.2,           # Maximum allowed movement between frames (as fraction of frame size)
+            'prediction_frames': 3,        # Number of frames to predict movement
+            'cache_duration': 30,          # Base cache duration
+            'confidence_boost': 1.2,       # Confidence multiplier for tracked faces
+            'smooth_factor': 0.7,          # Smoothing factor for position updates (0-1)
+            'velocity_decay': 0.95,        # Velocity decay factor per frame
+            'min_velocity': 0.001         # Minimum velocity threshold
         }
         
-        # Add video processing settings
-        self.video_settings = {
-            'batch_size': 5,  # Number of videos to process in parallel
-            'default_threshold': 80,  # Default recognition threshold
-            'min_confidence': 90,  # Minimum confidence for face detection
-            'frame_skip': 3,  # Process every Nth frame
-            'output_formats': ['mp4', 'avi', 'mov'],
-            'report_formats': ['csv', 'json', 'xlsx']
-        }
-        
-        # Add new attributes for face recognition settings
-        self.recognition_settings = {
-            'default_threshold': 80,  # Default recognition threshold
-            'min_confidence': 90,  # Minimum confidence for face detection
-            'max_faces': 5,  # Maximum number of faces to detect per frame
-            'tracking_enabled': True,  # Enable face tracking
-            'quality_filtering': True,  # Enable quality filtering
-            'batch_size': 5,  # Number of videos to process in parallel
-            'frame_skip': 3,  # Process every Nth frame
-            'output_formats': ['mp4', 'avi', 'mov'],
-            'report_formats': ['csv', 'json', 'xlsx']
-        }
-        
-        # Add per-person recognition settings
-        self.person_settings = defaultdict(lambda: {
-            'recognition_threshold': self.recognition_settings['default_threshold'],
-            'min_confidence': self.recognition_settings['min_confidence'],
-            'priority': 1,  # Higher number = higher priority
-            'enabled': True
-        })
-        
-        # Create necessary directories
-        os.makedirs(self.collection_settings['backup_dir'], exist_ok=True)
-        os.makedirs(self.collection_settings['export_dir'], exist_ok=True)
-        
-        # Load person settings if exists
-        self.load_person_settings()
-        
-        # Add new attributes for optimized face tracking
-        self.known_faces_cache = {}  # Cache for recognized faces
-        self.face_tracking_history = {}  # Track face positions and recognition status
-        self.tracking_confidence_threshold = 0.95  # Threshold for considering a face as "known"
-        self.tracking_iou_threshold = 0.3  # IOU threshold for tracking
-        self.max_tracking_frames = 30  # Maximum frames to track without re-recognition
-        self.tracking_frame_counter = 0  # Counter for tracking frames
+        # Enhanced tracking data structures
+        self.tracked_faces = {}  # Format: {track_id: {'box': (x,y,w,h), 'name': name, 'confidence': conf, 'frames': count, 'velocity': (dx,dy), 'last_pos': (x,y)}}
+        self.tracking_counter = 0
+        self.last_frame_size = None
 
     def load_face_mapping(self):
         """Load existing face mappings from JSON file"""
@@ -187,7 +152,7 @@ class VideoAnalyzer:
             print("✅ Updated face mapping with UUIDs")
 
     def index_face(self, image_path, person_name):
-        """Index a face image into the AWS Rekognition collection with UUID"""
+        """Index a face image into the AWS Rekognition collection"""
         try:
             # Read the image
             with open(image_path, 'rb') as image:
@@ -215,8 +180,8 @@ class VideoAnalyzer:
                     'created_at': datetime.now().isoformat()
                 }
             
-            # Create a unique external ID using just the UUID
-            external_id = self.face_mapping[base_name]['uuid']
+            # Use the person's name as the external ID
+            external_id = base_name
             
             # Index the face
             response = self.rekognition.index_faces(
@@ -233,8 +198,8 @@ class VideoAnalyzer:
                 if face_id not in self.face_mapping[base_name]['face_ids']:
                     self.face_mapping[base_name]['face_ids'].append(face_id)
                 
-                # Move the image to indexed directory with UUID in filename
-                indexed_filename = f"{base_name}_{self.face_mapping[base_name]['uuid']}_{len(self.face_mapping[base_name]['images'])}.jpg"
+                # Move the image to indexed directory with person name in filename
+                indexed_filename = f"{base_name}_{len(self.face_mapping[base_name]['images'])}.jpg"
                 indexed_path = os.path.join(self.indexed_dir, indexed_filename)
                 
                 # Only move and add image if not already present
@@ -244,11 +209,8 @@ class VideoAnalyzer:
                 
                 self.face_mapping[base_name]['last_updated'] = datetime.now().isoformat()
                 
-                # Clean up any duplicate entries
-                self.cleanup_duplicate_entries()
-                
                 self.save_face_mapping()
-                print(f"✅ Successfully indexed face for {base_name} (UUID: {self.face_mapping[base_name]['uuid']})")
+                print(f"✅ Successfully indexed face for {base_name}")
                 return True
             else:
                 print(f"❌ Failed to index face in {image_path}")
@@ -257,19 +219,6 @@ class VideoAnalyzer:
         except Exception as e:
             print(f"❌ Error indexing face: {e}")
             return False
-
-    def list_unrecognized_faces(self):
-        """List all unrecognized faces available for indexing"""
-        faces = []
-        for filename in os.listdir(self.unrecognized_dir):
-            if filename.endswith(('.jpg', '.jpeg', '.png')):
-                path = os.path.join(self.unrecognized_dir, filename)
-                faces.append({
-                    'path': path,
-                    'filename': filename,
-                    'timestamp': os.path.getmtime(path)
-                })
-        return sorted(faces, key=lambda x: x['timestamp'], reverse=True)
 
     def check_existing_face(self, image_path, threshold=80):
         """Check if a face might already be in the collection"""
@@ -302,846 +251,653 @@ class VideoAnalyzer:
             print(f"⚠️ Error checking existing face: {e}")
             return None
 
-    def index_unrecognized_faces(self):
-        """Interactive method to index unrecognized faces"""
-        faces = self.list_unrecognized_faces()
-        
-        if not faces:
-            print("No unrecognized faces found!")
-            return
-        
-        print("\n=== Unrecognized Faces ===")
-        for i, face in enumerate(faces, 1):
-            print(f"\n{i}. {face['filename']}")
-            print(f"   Path: {face['path']}")
-            print(f"   Detected: {datetime.fromtimestamp(face['timestamp']).strftime('%Y-%m-%d %H:%M:%S')}")
-            
-            # Display the face image
-            img = cv2.imread(face['path'])
-            if img is not None:
-                # Resize if too large
-                max_height = 300
-                if img.shape[0] > max_height:
-                    scale = max_height / img.shape[0]
-                    img = cv2.resize(img, None, fx=scale, fy=scale)
-                cv2.imshow("Face to Index (Press any key to continue)", img)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
-            
-            # Check if face might already be in collection
-            existing_matches = self.check_existing_face(face['path'])
-            if existing_matches:
-                print("\n⚠️ This face might already be in the collection!")
-                print("Possible matches:")
-                for match in existing_matches:
-                    print(f"  • {match['name']} ({match['similarity']:.1f}% similarity)")
-                
-                while True:
-                    action = input("\nWhat would you like to do?\n"
-                                 "1. Add as new person anyway\n"
-                                 "2. Add to existing person\n"
-                                 "3. Skip this face\n"
-                                 "4. Delete this face\n"
-                                 "5. Exit indexing\n"
-                                 "Enter choice (1-5): ").strip()
-                    
-                    if action == '1':
-                        person_name = input("Enter new person's name: ").strip()
-                        if person_name:
-                            if self.index_face(face['path'], person_name):
-                                print(f"✅ Face indexed as new person: {person_name}")
-                            break
-                        else:
-                            print("❌ Name cannot be empty!")
-                    elif action == '2':
-                        print("\nSelect person to add to:")
-                        for idx, match in enumerate(existing_matches, 1):
-                            print(f"{idx}. {match['name']} ({match['similarity']:.1f}%)")
-                        try:
-                            choice = int(input("Enter number (1-{}): ".format(len(existing_matches))))
-                            if 1 <= choice <= len(existing_matches):
-                                person_name = existing_matches[choice-1]['name']
-                                if self.index_face(face['path'], person_name):
-                                    print(f"✅ Face added to existing person: {person_name}")
-                                break
-                            else:
-                                print("❌ Invalid choice!")
-                        except ValueError:
-                            print("❌ Please enter a valid number!")
-                    elif action == '3':
-                        print("Skipping this face...")
-                        break
-                    elif action == '4':
-                        try:
-                            os.remove(face['path'])
-                            print("✅ Face deleted")
-                            break
-                        except Exception as e:
-                            print(f"❌ Error deleting face: {e}")
-                    elif action == '5':
-                        print("Exiting face indexing...")
-                        return
-                    else:
-                        print("❌ Invalid choice, please try again")
-            else:
-                # No existing matches found, proceed with normal indexing
-                while True:
-                    action = input("\nWhat would you like to do?\n"
-                                 "1. Index this face\n"
-                                 "2. Skip this face\n"
-                                 "3. Delete this face\n"
-                                 "4. Exit indexing\n"
-                                 "Enter choice (1-4): ").strip()
-                    
-                    if action == '1':
-                        person_name = input("Enter person's name: ").strip()
-                        if person_name:
-                            if self.index_face(face['path'], person_name):
-                                print(f"✅ Face indexed as {person_name}")
-                            break
-                        else:
-                            print("❌ Name cannot be empty!")
-                    elif action == '2':
-                        print("Skipping this face...")
-                        break
-                    elif action == '3':
-                        try:
-                            os.remove(face['path'])
-                            print("✅ Face deleted")
-                            break
-                        except Exception as e:
-                            print(f"❌ Error deleting face: {e}")
-                    elif action == '4':
-                        print("Exiting face indexing...")
-                        return
-                    else:
-                        print("❌ Invalid choice, please try again")
-        
-        print("\n=== Face Indexing Complete ===")
-        print("Current collection status:")
-        for person, data in self.face_mapping.items():
-            print(f"\n{person}:")
-            print(f"  • UUID: {data['uuid']}")
-            print(f"  • Face IDs: {len(data['face_ids'])}")
-            print(f"  • Images: {len(data['images'])}")
-            print(f"  • Created: {data.get('created_at', 'Unknown')}")
-            print(f"  • Last Updated: {data.get('last_updated', 'Unknown')}")
-
     def preprocess_frame(self, frame):
-        """Enhance frame quality for better face detection"""
+        """Enhanced frame preprocessing for better face detection"""
         if frame is None or frame.size == 0:
             return frame, None
 
         # Convert to grayscale for processing
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Apply histogram equalization to improve contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # Apply enhanced CLAHE for better contrast
+        clahe = cv2.createCLAHE(
+            clipLimit=self.preprocessing_settings['clahe_clip_limit'],
+            tileGridSize=self.preprocessing_settings['clahe_grid_size']
+        )
         gray = clahe.apply(gray)
         
-        # Apply bilateral filter to reduce noise while preserving edges
-        gray = cv2.bilateralFilter(gray, 9, 75, 75)
+        # Apply bilateral filter with optimized parameters
+        gray = cv2.bilateralFilter(
+            gray,
+            self.preprocessing_settings['bilateral_d'],
+            self.preprocessing_settings['bilateral_sigma_color'],
+            self.preprocessing_settings['bilateral_sigma_space']
+        )
         
-        # Enhance contrast
-        alpha = 1.3  # Contrast control
-        beta = 10    # Brightness control
+        # Enhanced contrast and brightness
+        alpha = self.preprocessing_settings['contrast_alpha']
+        beta = self.preprocessing_settings['contrast_beta']
         gray = cv2.convertScaleAbs(gray, alpha=alpha, beta=beta)
         
-        # Sharpen the image
-        kernel = np.array([[-1, -1, -1], 
-                          [-1, 9, -1], 
-                          [-1, -1, -1]])
-        gray = cv2.filter2D(gray, -1, kernel)
+        # Apply sharpening
+        gray = cv2.filter2D(gray, -1, self.preprocessing_settings['sharpen_kernel'])
         
         # Convert back to color for display
         enhanced = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         
         return enhanced, gray
 
-    def save_unrecognized_face(self, frame, face_box, confidence):
-        """Save unrecognized face for review with quality assessment"""
-        height, width = frame.shape[:2]
-        left = int(face_box['Left'] * width)
-        top = int(face_box['Top'] * height)
-        right = left + int(face_box['Width'] * width)
-        bottom = top + int(face_box['Height'] * height)
+    def assess_face_quality(self, face_image):
+        """Assess the quality of a face image with detailed metrics
         
-        # Add margin around face
-        margin = 20
-        left = max(0, left - margin)
-        top = max(0, top - margin)
-        right = min(width, right + margin)
-        bottom = min(height, bottom + margin)
-        
-        face_region = frame[top:bottom, left:right]
-        if face_region.size == 0:
-            return
-        
-        # Assess face quality before saving
-        quality_score, issues = self.assess_face_quality(face_region)
-        
-        # Only save if quality is acceptable
-        if quality_score >= 60:  # Minimum quality threshold
-            # Save with timestamp, confidence, and quality score
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"face_{timestamp}_conf{confidence:.0f}_qual{quality_score:.0f}.jpg"
-            filepath = os.path.join(self.unrecognized_dir, filename)
-            cv2.imwrite(filepath, face_region)
+        Args:
+            face_image: numpy array of the face image
             
-            # Log quality issues
+        Returns:
+            tuple: (quality_score, issues_list) where quality_score is 0-100 and issues_list contains quality problems
+        """
+        try:
+            # Convert to grayscale if needed
+            if len(face_image.shape) == 3:
+                gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = face_image
+                
+            issues = []
+            metrics = {}
+            
+            # 1. Calculate Laplacian variance (measure of sharpness)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            metrics['sharpness'] = min(100, laplacian_var)
+            if laplacian_var < 50:
+                issues.append("Image is blurry")
+            elif laplacian_var > 500:
+                issues.append("Image is too sharp/noisy")
+                
+            # 2. Calculate face size score
+            height, width = gray.shape
+            face_size = height * width
+            metrics['size'] = min(100, (face_size / 10000) * 100)  # Normalize to 100x100
+            if face_size < 5000:  # Less than 70x70 pixels
+                issues.append("Face is too small")
+            elif face_size > 100000:  # More than 300x300 pixels
+                issues.append("Face is too large")
+                
+            # 3. Calculate brightness and contrast
+            brightness = np.mean(gray)
+            contrast = np.std(gray)
+            metrics['brightness'] = min(100, (brightness / 255) * 100)
+            metrics['contrast'] = min(100, (contrast / 128) * 100)
+            
+            if brightness < 40:
+                issues.append("Image is too dark")
+            elif brightness > 200:
+                issues.append("Image is too bright")
+            if contrast < 30:
+                issues.append("Low contrast")
+            elif contrast > 150:
+                issues.append("Too much contrast")
+                
+            # 4. Check face angle (if we have facial landmarks)
+            try:
+                # Convert to RGB for face_recognition
+                rgb_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+                face_landmarks = face_recognition.face_landmarks(rgb_image)
+                if face_landmarks:
+                    # Get nose bridge points
+                    nose_bridge = face_landmarks[0]['nose_bridge']
+                    if len(nose_bridge) >= 2:
+                        # Calculate angle from vertical
+                        dx = nose_bridge[-1][0] - nose_bridge[0][0]
+                        dy = nose_bridge[-1][1] - nose_bridge[0][1]
+                        angle = abs(np.degrees(np.arctan2(dx, dy)))
+                        metrics['angle'] = 100 - min(100, angle * 2)  # Convert to score
+                        if angle > 15:
+                            issues.append("Face is tilted")
+                else:
+                    metrics['angle'] = 0
+                    issues.append("Could not detect facial landmarks")
+            except Exception as e:
+                metrics['angle'] = 0
+                issues.append("Could not analyze face angle")
+                
+            # 5. Check for occlusions (basic check using face_recognition)
+            try:
+                face_encodings = face_recognition.face_encodings(rgb_image)
+                if not face_encodings:
+                    issues.append("Face may be partially occluded")
+                    metrics['occlusion'] = 0
+                else:
+                    metrics['occlusion'] = 100
+            except:
+                metrics['occlusion'] = 0
+                
+            # Calculate final quality score with weights
+            weights = {
+                'sharpness': 0.25,
+                'size': 0.20,
+                'brightness': 0.15,
+                'contrast': 0.15,
+                'angle': 0.15,
+                'occlusion': 0.10
+            }
+            
+            quality_score = sum(metrics[k] * weights[k] for k in weights.keys())
+            
+            # Add guidance if there are issues
             if issues:
-                print(f"⚠️ Face quality issues: {', '.join(issues)}")
-                print(f"Quality score: {quality_score}/100")
-        else:
-            print(f"❌ Face quality too low ({quality_score}/100): {', '.join(issues)}")
-
-    def process_video(self, video_path, progress_callback=None):
-        """Process a video file with optional progress callback"""
-        if not os.path.exists(video_path):
-            raise FileNotFoundError(f"Video file not found: {video_path}")
-            
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video file: {video_path}")
-            
-        # Get video properties
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = 0
-        
-        try:
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+                guidance = []
+                if "Image is blurry" in issues:
+                    guidance.append("Hold the camera steady")
+                if "Face is too small" in issues:
+                    guidance.append("Move closer to the camera")
+                if "Face is too large" in issues:
+                    guidance.append("Move further from the camera")
+                if "Image is too dark" in issues:
+                    guidance.append("Move to a better lit area")
+                if "Image is too bright" in issues:
+                    guidance.append("Reduce lighting or move to a darker area")
+                if "Face is tilted" in issues:
+                    guidance.append("Keep your head straight")
+                if "Face may be partially occluded" in issues:
+                    guidance.append("Remove any obstructions from your face")
                     
-                # Process every nth frame
-                if frame_count % self.frame_skip == 0:
-                    # Analyze frame
-                    results = self.analyze_frame(frame)
-                    
-                    # Update tracking
-                    self.update_tracked_faces(frame)
-                    
-                    # Draw detections
-                    frame = self.draw_detections(frame)
-                    
-                    # Call progress callback if provided
-                    if progress_callback:
-                        progress = (frame_count / total_frames) * 100
-                        progress_callback(progress, frame_count, total_frames)
+                issues.extend([f"Tip: {tip}" for tip in guidance])
                 
-                frame_count += 1
+            return quality_score, issues, metrics
                 
-        finally:
-                cap.release()
-                
-        return {
-            'total_frames': total_frames,
-            'processed_frames': frame_count,
-            'faces_detected': self.total_faces_detected,
-            'faces_recognized': len(self.recognized_faces)
-        }
-
-    def analyze_frame(self, frame):
-        """Analyze a single frame with optimized recognition"""
-        start_time = time.time()
-        
-        # Skip empty frames
-        if frame is None or frame.size == 0:
-            print("⚠️ Empty frame received")
-            return {'faces': []}
-
-        # Preprocess frame for better detection
-        enhanced_frame, gray_frame = self.preprocess_frame(frame)
-
-        # Convert frame to JPEG bytes
-        try:
-            _, img_encoded = cv2.imencode('.jpg', enhanced_frame)
-            image_bytes = img_encoded.tobytes()
-            print(f"✅ Frame encoded successfully, size: {len(image_bytes)} bytes")
         except Exception as e:
-            print(f"⚠️ Frame encoding error: {e}")
-            return {'faces': []}
-        
-        results = {
-            'faces': []
-        }
-        
+            print(f"Error assessing face quality: {e}")
+            return 0, ["Error analyzing face quality"], {}
+
+    def get_face_encoding(self, image):
+        """Get face encoding from image (file path or numpy array)"""
         try:
-            print("🔍 Attempting face detection with AWS Rekognition...")
-            # Face detection with improved parameters
-            detect_response = self.rekognition.detect_faces(
-                Image={'Bytes': image_bytes},
-                Attributes=['DEFAULT', 'ALL']
-            )
-            
-            print(f"📊 Face detection response: {len(detect_response.get('FaceDetails', []))} faces detected")
-            
-            # Update total faces detected
-            self.total_faces_detected += len(detect_response.get('FaceDetails', []))
-            
-            # Only perform recognition for new faces or when tracking is lost
-            for face_detail in detect_response.get('FaceDetails', []):
-                face_box = face_detail['BoundingBox']
-                confidence = face_detail['Confidence']
-                print(f"👤 Face detected - Confidence: {confidence:.1f}%, Box: {face_box}")
-                
-                height, width = frame.shape[:2]
-                left = int(face_box['Left'] * width)
-                top = int(face_box['Top'] * height)
-                right = left + int(face_box['Width'] * width)
-                bottom = top + int(face_box['Height'] * height)
-                
-                # Ensure the crop is within frame bounds
-                left = max(0, left)
-                top = max(0, top)
-                right = min(width, right)
-                bottom = min(height, bottom)
-                
-                if right <= left or bottom <= top:
-                    continue
-                
-                face_region = frame[top:bottom, left:right]
-                if face_region.size == 0:
-                    continue
-                
-                # Check if this face is already being tracked
-                is_tracked = False
-                for track_data in self.tracked_faces.values():
-                    track_box = track_data['box']
-                    iou = self.calculate_iou((left, top, right, bottom), track_box)
-                    if iou > self.tracking_iou_threshold and track_data.get('recognized', False):
-                        # Face is already tracked and recognized
-                        results['faces'].append({
-                            'Face': {
-                                'BoundingBox': face_box,
-                                'ExternalImageId': track_data['name'],
-                                'Confidence': track_data['confidence']
-                            },
-                            'Similarity': 100.0,
-                            'Recognized': True
-                        })
-                        is_tracked = True
-                        break
-                
-                if not is_tracked:
-                    # New face or lost tracking, perform recognition
-                    _, face_encoded = cv2.imencode('.jpg', face_region)
-                    face_bytes = face_encoded.tobytes()
-                    
-                    try:
-                        recognize_response = self.rekognition.search_faces_by_image(
-                            CollectionId=self.collection_id,
-                            Image={'Bytes': face_bytes},
-                            MaxFaces=1,
-                            FaceMatchThreshold=80
-                        )
-                        
-                        if recognize_response.get('FaceMatches'):
-                            match = recognize_response['FaceMatches'][0]
-                            user_id = match['Face']['ExternalImageId']
-                            self.recognized_faces.add(user_id)
-                            results['faces'].append({
-                                'Face': {
-                                    'BoundingBox': face_box,
-                                    'ExternalImageId': user_id,
-                                    'Confidence': confidence
-                                },
-                                'Similarity': match['Similarity'],
-                                'Recognized': True
-                            })
-                        else:
-                            # Save unrecognized face if confidence is high enough
-                            if confidence > 90:
-                                self.save_unrecognized_face(frame, face_box, confidence)
-                                results['faces'].append({
-                                    'Face': {
-                                        'BoundingBox': face_box,
-                                        'ExternalImageId': 'Unknown',
-                                        'Confidence': confidence
-                                    },
-                                    'Similarity': 0,
-                                    'Recognized': False
-                                })
-                    except Exception as e:
-                        # Save face if detection confidence is high but recognition failed
-                        if confidence > 90:
-                            self.save_unrecognized_face(frame, face_box, confidence)
-                    
-        except Exception as e:
-            print(f"⚠️ Face detection error: {e}")
-            print(f"Error type: {type(e).__name__}")
-            if hasattr(e, 'response'):
-                print(f"AWS Response: {e.response}")
-        
-        # Update performance metrics
-        processing_time = time.time() - start_time
-        self.update_performance_metrics(results, processing_time)
-        
-        return results
-
-    def update_tracked_faces(self, frame):
-        """Update tracked faces with optimized recognition"""
-        height, width = frame.shape[:2]
-        current_boxes = []
-        current_matches = []
-        
-        # Get current frame detections
-        if self.last_results['faces']:
-            for match in self.last_results['faces']:
-                box = match['Face']['BoundingBox']
-                left = int(box['Left'] * width)
-                top = int(box['Top'] * height)
-                right = left + int(box['Width'] * width)
-                bottom = top + int(box['Height'] * height)
-                current_boxes.append((left, top, right, bottom))
-                current_matches.append(match)
-        
-        # Update existing tracks or create new ones
-        updated_tracks = {}
-        processed_boxes = set()
-        
-        # First, try to match with existing tracks
-        for track_id, track_data in self.tracked_faces.items():
-            matched = False
-            best_iou = 0
-            best_match = None
-            best_box = None
-            
-            # Find best matching box for this track
-            for i, (box, match) in enumerate(zip(current_boxes, current_matches)):
-                if i in processed_boxes:
-                    continue
-                    
-                iou = self.calculate_iou(box, track_data['box'])
-                if iou > best_iou:
-                    best_iou = iou
-                    best_match = match
-                    best_box = box
-            
-            # Update track if good match found
-            if best_iou > self.tracking_iou_threshold:
-                processed_boxes.add(current_boxes.index(best_box))
-                
-                # Check if this is a known face
-                if track_id in self.known_faces_cache:
-                    # Use cached recognition
-                    updated_tracks[track_id] = {
-                        'box': best_box,
-                        'name': self.known_faces_cache[track_id]['name'],
-                        'confidence': self.known_faces_cache[track_id]['confidence'],
-                        'frames_since_update': 0,
-                        'recognized': True,
-                        'tracking_frames': track_data.get('tracking_frames', 0) + 1
-                    }
-                else:
-                    # New face or lost tracking, perform recognition
-                    if best_match.get('Recognized', False):
-                        # Face was recognized in this frame
-                        similarity = best_match.get('Similarity', 0)
-                        if similarity >= self.tracking_confidence_threshold:
-                            # Add to known faces cache
-                            self.known_faces_cache[track_id] = {
-                                'name': best_match['Face']['ExternalImageId'],
-                                'confidence': best_match['Face']['Confidence'],
-                                'last_updated': self.tracking_frame_counter
-                            }
-                        
-                        updated_tracks[track_id] = {
-                            'box': best_box,
-                            'name': best_match['Face']['ExternalImageId'],
-                            'confidence': best_match['Face']['Confidence'],
-                            'frames_since_update': 0,
-                            'recognized': True,
-                            'tracking_frames': 1
-                        }
-                    else:
-                        # Unrecognized face
-                        updated_tracks[track_id] = {
-                            'box': best_box,
-                            'name': 'Unknown',
-                            'confidence': best_match['Face']['Confidence'],
-                            'frames_since_update': 0,
-                            'recognized': False,
-                            'tracking_frames': 1
-                        }
-                matched = True
-            
-            if not matched:
-                # Track lost, but keep for a few frames
-                track_data['frames_since_update'] += 1
-                if track_data['frames_since_update'] < 5:
-                    updated_tracks[track_id] = track_data
-        
-        # Create new tracks for unmatched boxes
-        for i, (box, match) in enumerate(zip(current_boxes, current_matches)):
-            if i in processed_boxes:
-                continue
-                
-            new_id = self.tracking_counter
-            self.tracking_counter += 1
-            
-            if match.get('Recognized', False):
-                # New recognized face
-                similarity = match.get('Similarity', 0)
-                if similarity >= self.tracking_confidence_threshold:
-                    # Add to known faces cache
-                    self.known_faces_cache[new_id] = {
-                        'name': match['Face']['ExternalImageId'],
-                        'confidence': match['Face']['Confidence'],
-                        'last_updated': self.tracking_frame_counter
-                    }
-                
-                updated_tracks[new_id] = {
-                    'box': box,
-                    'name': match['Face']['ExternalImageId'],
-                    'confidence': match['Face']['Confidence'],
-                    'frames_since_update': 0,
-                    'recognized': True,
-                    'tracking_frames': 1
-                }
-            else:
-                # New unrecognized face
-                updated_tracks[new_id] = {
-                    'box': box,
-                    'name': 'Unknown',
-                    'confidence': match['Face']['Confidence'],
-                    'frames_since_update': 0,
-                    'recognized': False,
-                    'tracking_frames': 1
-                }
-        
-        # Clean up old known faces cache
-        current_time = self.tracking_frame_counter
-        self.known_faces_cache = {
-            track_id: data for track_id, data in self.known_faces_cache.items()
-            if current_time - data['last_updated'] < self.max_tracking_frames
-        }
-        
-        # Update tracking counter
-        self.tracking_frame_counter += 1
-        
-        # Update tracked faces
-        self.tracked_faces = updated_tracks
-
-    def calculate_iou(self, box1, box2):
-        """Calculate Intersection over Union for two bounding boxes"""
-        x_left = max(box1[0], box2[0])
-        y_top = max(box1[1], box2[1])
-        x_right = min(box1[2], box2[2])
-        y_bottom = min(box1[3], box2[3])
-        
-        if x_right < x_left or y_bottom < y_top:
-            return 0.0
-        
-        intersection_area = (x_right - x_left) * (y_bottom - y_top)
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union_area = box1_area + box2_area - intersection_area
-        
-        return intersection_area / union_area
-
-    def draw_detections(self, frame):
-        """Draw face detections with tracking information"""
-        if frame is None or frame.size == 0:
-            return frame
-
-        # Draw tracked faces
-        for track_id, track_data in self.tracked_faces.items():
-            box = track_data['box']
-            left, top, right, bottom = box
-            
-            # Choose color based on recognition status
-            if track_data.get('recognized', False):
-                if track_id in self.known_faces_cache:
-                    # Known face - use green
-                    color = (0, 255, 0)
-                    name = track_data['name']
-                    confidence = "100%"  # Known face, so we're confident
-                else:
-                    # Recognized but not yet cached - use blue
-                    color = (255, 0, 0)
-                    name = track_data['name']
-                    confidence = f"{track_data['confidence']:.0f}%"
-            else:
-                # Unrecognized face - use orange
-                color = self.unrecognized_color
-                name = "Unknown"
-                confidence = f"{track_data['confidence']:.0f}%"
-            
-            # Draw face box
-            cv2.rectangle(frame, (left, top), (right, bottom), 
-                         color, self.box_thickness)
-            
-            # Draw name label background
-            cv2.rectangle(frame, (left, top-30), (right, top), 
-                         color, -1)
-            
-            # Draw name and confidence
-            label = f"{name} ({confidence})"
-            cv2.putText(frame, label,
-                       (left+5, top-10), self.font, 0.6, (255, 255, 255), 1)
-            
-            # Draw tracking ID for debugging
-            if track_id in self.known_faces_cache:
-                cv2.putText(frame, f"Track: {track_id}",
-                           (left+5, bottom+15), self.font, 0.5, color, 1)
-        
-        return frame
-
-    def force_recheck_unrecognized_faces(self, threshold=70):
-        """Force recheck all unrecognized faces with a lower threshold"""
-        faces = self.list_unrecognized_faces()
-        
-        if not faces:
-            print("No unrecognized faces found!")
-            return
-        
-        print(f"\n=== Rechecking Unrecognized Faces (Threshold: {threshold}%) ===")
-        found_matches = []
-        
-        for face in faces:
-            print(f"\nChecking: {face['filename']}")
-            matches = self.check_existing_face(face['path'], threshold=threshold)
-            
-            if matches:
-                print("Found potential matches:")
-                for match in matches:
-                    print(f"  • {match['name']} ({match['similarity']:.1f}% similarity)")
-                found_matches.append({
-                    'face': face,
-                    'matches': matches
-                })
-            else:
-                print("No matches found even with lower threshold")
-        
-        if found_matches:
-            print("\n=== Found Potential Matches ===")
-            for i, data in enumerate(found_matches, 1):
-                face = data['face']
-                matches = data['matches']
-                print(f"\n{i}. {face['filename']}")
-                print("   Possible matches:")
-                for match in matches:
-                    print(f"      • {match['name']} ({match['similarity']:.1f}%)")
-                
-                # Display the face image
-                img = cv2.imread(face['path'])
-                if img is not None:
-                    max_height = 300
-                    if img.shape[0] > max_height:
-                        scale = max_height / img.shape[0]
-                        img = cv2.resize(img, None, fx=scale, fy=scale)
-                    cv2.imshow("Face to Process (Press any key to continue)", img)
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
-                
-                while True:
-                    action = input("\nWhat would you like to do?\n"
-                                 "1. Add to existing person\n"
-                                 "2. Skip this face\n"
-                                 "3. Delete this face\n"
-                                 "4. Exit rechecking\n"
-                                 "Enter choice (1-4): ").strip()
-                    
-                    if action == '1':
-                        print("\nSelect person to add to:")
-                        for idx, match in enumerate(matches, 1):
-                            print(f"{idx}. {match['name']} ({match['similarity']:.1f}%)")
-                        try:
-                            choice = int(input("Enter number (1-{}): ".format(len(matches))))
-                            if 1 <= choice <= len(matches):
-                                person_name = matches[choice-1]['name']
-                                if self.index_face(face['path'], person_name):
-                                    print(f"✅ Face added to existing person: {person_name}")
-                                break
-                            else:
-                                print("❌ Invalid choice!")
-                        except ValueError:
-                            print("❌ Please enter a valid number!")
-                    elif action == '2':
-                        print("Skipping this face...")
-                        break
-                    elif action == '3':
-                        try:
-                            os.remove(face['path'])
-                            print("✅ Face deleted")
-                            break
-                        except Exception as e:
-                            print(f"❌ Error deleting face: {e}")
-                    elif action == '4':
-                        print("Exiting recheck...")
-                        return
-                    else:
-                        print("❌ Invalid choice, please try again")
-        else:
-            print("\nNo matches found even with lower threshold. You might want to:")
-            print("1. Try an even lower threshold")
-            print("2. Check if the face is clearly visible")
-            print("3. Add the face as a new entry to the collection")
-
-    def get_face_encoding(self, image_path):
-        """Get face encoding using face_recognition library"""
-        try:
-            # Load image
-            image = face_recognition.load_image_file(image_path)
+            # If image is a path, load it
+            if isinstance(image, str):
+                if not os.path.exists(image):
+                    return None
+                image = cv2.imread(image)
+                if image is None:
+                    return None
+                # Convert BGR to RGB
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
             # Get face locations
             face_locations = face_recognition.face_locations(image)
             if not face_locations:
                 return None
-            
+                
             # Get face encodings
             face_encodings = face_recognition.face_encodings(image, face_locations)
             if not face_encodings:
                 return None
-            
-            # Return the first face encoding
-            return face_encodings[0]
+                
+            return face_encodings[0]  # Return first face encoding
             
         except Exception as e:
-            print(f"⚠️ Error getting face encoding for {image_path}: {e}")
+            print(f"Error getting face encoding: {e}")
             return None
 
     def compare_faces(self, encoding1, encoding2):
-        """Compare two face encodings using cosine similarity"""
-        if encoding1 is None or encoding2 is None:
+        """Compare two face encodings and return similarity score"""
+        try:
+            # Calculate cosine similarity
+            similarity = 1 - distance.cosine(encoding1, encoding2)
+            return similarity
+        except Exception as e:
+            print(f"Error comparing faces: {e}")
             return 0.0
-        return cosine_similarity([encoding1], [encoding2])[0][0]
 
-    def find_duplicate_faces(self):
-        """Find and handle duplicate faces in unrecognized_faces directory"""
-        print("\n=== Checking for Duplicate Faces ===")
-        
-        # Get all face images
-        faces = self.list_unrecognized_faces()
-        if not faces:
-            print("No unrecognized faces found!")
+    def process_video(self, video_path, progress_callback=None):
+        """Process a video file with optional progress callback"""
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"Could not open video file: {video_path}")
+
+        # Get video properties
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        frame_count = 0
+
+        # Reset tracking and performance metrics for the new video
+        self.tracked_faces = {}
+        self.tracking_counter = 0
+        self.performance_metrics = {
+            'total_frames_processed': 0,
+            'total_faces_detected': 0,
+            'total_faces_recognized': 0,
+            'recognition_times': [],
+            'confidence_scores': []
+        }
+        self.recognized_faces = set()
+
+        # Create output directory
+        output_dir = "output"
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Create output file path
+        output_filename = os.path.basename(video_path).split('.')[0] + '_analyzed.mp4'
+        output_path = os.path.join(output_dir, output_filename)
+
+        # Define video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                if frame_count % self.frame_skip == 0:
+                    self.analyze_frame(frame)
+
+                self.update_tracked_faces(frame)
+                display_frame = frame.copy()
+                display_frame = self.draw_detections(display_frame)
+
+                if progress_callback:
+                    progress_callback(display_frame, frame_count, total_frames)
+
+                out.write(display_frame)
+                frame_count += 1
+                self.performance_metrics['total_frames_processed'] = frame_count
+
+        finally:
+            cap.release()
+            out.release()
+            self.save_historical_data()
+
+        return {
+            'total_frames': total_frames,
+            'processed_frames': frame_count,
+            'faces_detected': self.performance_metrics['total_faces_detected'],
+            'faces_recognized': len(self.recognized_faces)
+        }
+
+    def analyze_frame(self, frame):
+        """Analyze a single frame with optimized recognition and caching"""
+        start_time = time.time()
+
+        if frame is None or frame.size == 0:
+            return {'faces': []}
+
+        # Enhanced preprocessing
+        enhanced_frame, gray_frame = self.preprocess_frame(frame)
+
+        # Convert frame to JPEG bytes with higher quality
+        try:
+            _, img_encoded = cv2.imencode('.jpg', enhanced_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            image_bytes = img_encoded.tobytes()
+        except Exception as e:
+            print(f"⚠️ Frame encoding error: {e}")
+            return {'faces': []}
+
+        results = {'faces': []}
+
+        try:
+            # Face detection with improved parameters
+            detect_response = self.rekognition.detect_faces(
+                Image={'Bytes': image_bytes},
+                Attributes=['ALL']
+            )
+
+            self.performance_metrics['total_faces_detected'] += len(detect_response.get('FaceDetails', []))
+
+            for face_detail in detect_response.get('FaceDetails', []):
+                face_box = face_detail['BoundingBox']
+                confidence = face_detail['Confidence']
+
+                # Skip if confidence is too low
+                if confidence < self.recognition_settings['min_confidence']:
+                    continue
+
+                height, width = frame.shape[:2]
+                left = int(face_box['Left'] * width)
+                top = int(face_box['Top'] * height)
+                right = left + int(face_box['Width'] * width)
+                bottom = top + int(face_box['Height'] * height)
+
+                # Add padding to face region (20% on each side)
+                padding_x = int((right - left) * 0.2)
+                padding_y = int((bottom - top) * 0.2)
+                
+                # Ensure the crop is within frame bounds with padding
+                left = max(0, left - padding_x)
+                top = max(0, top - padding_y)
+                right = min(width, right + padding_x)
+                bottom = min(height, bottom + padding_y)
+
+                if right <= left or bottom <= top:
+                    continue
+
+                # Extract face region with padding
+                face_region = frame[top:bottom, left:right]
+                if face_region.size == 0 or face_region.shape[0] < 20 or face_region.shape[1] < 20:
+                    continue
+
+                # Ensure minimum face size
+                min_face_size = 100  # minimum pixels
+                if face_region.shape[0] < min_face_size or face_region.shape[1] < min_face_size:
+                    # Resize small faces to minimum size
+                    face_region = cv2.resize(face_region, (min_face_size, min_face_size))
+
+                # Additional preprocessing for face region
+                face_region = cv2.cvtColor(face_region, cv2.COLOR_BGR2RGB)  # Convert to RGB
+                
+                # Apply histogram equalization for better contrast
+                face_region_yuv = cv2.cvtColor(face_region, cv2.COLOR_RGB2YUV)
+                face_region_yuv[:,:,0] = cv2.equalizeHist(face_region_yuv[:,:,0])
+                face_region = cv2.cvtColor(face_region_yuv, cv2.COLOR_YUV2RGB)
+
+                # Convert back to BGR for saving
+                face_region_bgr = cv2.cvtColor(face_region, cv2.COLOR_RGB2BGR)
+
+                # Encode face region with high quality
+                try:
+                    _, face_encoded = cv2.imencode('.jpg', face_region_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    face_bytes = face_encoded.tobytes()
+                except Exception as e:
+                    print(f"⚠️ Face region encoding error: {e}")
+                    continue
+
+                # Perform recognition directly with AWS Rekognition
+                try:
+                    recognize_response = self.rekognition.search_faces_by_image(
+                        CollectionId=self.collection_id,
+                        Image={'Bytes': face_bytes},
+                        MaxFaces=self.recognition_settings['max_faces'],
+                        FaceMatchThreshold=self.recognition_settings['default_threshold']
+                    )
+
+                    if recognize_response.get('FaceMatches'):
+                        match = recognize_response['FaceMatches'][0]
+                        if match['Similarity'] >= self.recognition_settings['min_tracking_confidence']:
+                            # Add to tracking cache
+                            face_id = face_detail.get('FaceId')
+                            if face_id:
+                                self.tracking_cache[face_id] = {
+                                    'name': match['Face']['ExternalImageId'],
+                                    'confidence': match['Similarity'],
+                                    'frames': self.recognition_settings['tracking_cache_time']
+                                }
+                        
+                        results['faces'].append({
+                            'Face': {
+                                'BoundingBox': face_box,
+                                'ExternalImageId': match['Face']['ExternalImageId'],
+                                'Confidence': confidence,
+                                'FaceId': face_detail.get('FaceId')
+                            },
+                            'Similarity': match['Similarity'],
+                            'Recognized': True
+                        })
+                    else:
+                        results['faces'].append({
+                            'Face': {
+                                'BoundingBox': face_box,
+                                'ExternalImageId': 'Unknown',
+                                'Confidence': confidence,
+                                'FaceId': face_detail.get('FaceId')
+                            },
+                            'Similarity': 0,
+                            'Recognized': False
+                        })
+
+                except Exception as e:
+                    print(f"⚠️ Recognition error for detected face: {e}")
+                    # Add as unrecognized face
+                    results['faces'].append({
+                        'Face': {
+                            'BoundingBox': face_box,
+                            'ExternalImageId': 'Unknown',
+                            'Confidence': confidence,
+                            'FaceId': face_detail.get('FaceId')
+                        },
+                        'Similarity': 0,
+                        'Recognized': False
+                    })
+
+        except Exception as e:
+            print(f"⚠️ Face detection error: {e}")
+
+        processing_time = time.time() - start_time
+        self.update_performance_metrics(results, processing_time)
+        self.last_results = results
+
+        return results
+
+    def update_tracked_faces(self, frame):
+        """Enhanced face tracking with smooth movement and prediction"""
+        if frame is None or frame.size == 0:
             return
+
+        height, width = frame.shape[:2]
+        self.last_frame_size = (width, height)
         
-        # Get encodings for all faces
-        print("Analyzing faces...")
-        face_data = []
-        for face in faces:
-            encoding = self.get_face_encoding(face['path'])
-            if encoding is not None:
-                face_data.append({
-                    'path': face['path'],
-                    'encoding': encoding,
-                    'timestamp': face['timestamp']
-                })
+        # Update tracking cache counters
+        for face_id in list(self.tracking_cache.keys()):
+            self.tracking_cache[face_id]['frames'] -= 1
+            if self.tracking_cache[face_id]['frames'] <= 0:
+                del self.tracking_cache[face_id]
         
-        if not face_data:
-            print("No valid faces found to compare!")
-            return
+        # Prepare current frame's detection results
+        current_detections = []
+        if self.last_results.get('faces'):
+            for face_match in self.last_results['faces']:
+                box = face_match['Face']['BoundingBox']
+                left = int(box['Left'] * width)
+                top = int(box['Top'] * height)
+                right = left + int(box['Width'] * width)
+                bottom = top + int(box['Height'] * height)
+                
+                # Ensure box is within frame bounds
+                left = max(0, min(width - 1, left))
+                top = max(0, min(height - 1, top))
+                right = max(left + 1, min(width, right))
+                bottom = max(top + 1, min(height, bottom))
+                
+                detection = {
+                    'box': (left, top, right, bottom),
+                    'name': face_match['Face']['ExternalImageId'],
+                    'confidence': face_match.get('Similarity', face_match['Face'].get('Confidence', 0)),
+                    'recognized': face_match.get('Recognized', False),
+                    'face_id': face_match.get('Face', {}).get('FaceId')
+                }
+                current_detections.append(detection)
         
-        # Find duplicates
-        duplicates = []
-        processed = set()
+        # Update existing tracks with predictions
+        updated_tracks = {}
+        matched_detection_indices = set()
         
-        print("\nComparing faces...")
-        for i, face1 in enumerate(face_data):
-            if face1['path'] in processed:
+        # First pass: Update existing tracks with predictions
+        for track_id, track_data in list(self.tracked_faces.items()):
+            # Apply velocity decay
+            if 'velocity' in track_data:
+                dx, dy = track_data['velocity']
+                dx *= self.tracking_settings['velocity_decay']
+                dy *= self.tracking_settings['velocity_decay']
+                
+                # Stop very small movements
+                if abs(dx) < self.tracking_settings['min_velocity']:
+                    dx = 0
+                if abs(dy) < self.tracking_settings['min_velocity']:
+                    dy = 0
+                
+                track_data['velocity'] = (dx, dy)
+            
+            # Predict new position
+            predicted_box = self.predict_face_position(track_data, frame.shape)
+            
+            if predicted_box:
+                # Find best matching detection
+                best_iou = 0
+                best_match_index = -1
+                best_match_box = None
+                
+                for i, detection in enumerate(current_detections):
+                    if i in matched_detection_indices:
+                        continue
+                    
+                    # Calculate IOU with predicted position
+                    iou = self.calculate_iou(predicted_box, detection['box'])
+                    
+                    if iou > self.tracking_settings['iou_threshold'] and iou > best_iou:
+                        best_iou = iou
+                        best_match_index = i
+                        best_match_box = detection['box']
+                
+                if best_match_index != -1:
+                    # Update track with matched detection
+                    matched_detection_indices.add(best_match_index)
+                    detection = current_detections[best_match_index]
+                    
+                    # Calculate new velocity based on actual movement
+                    new_velocity = self.calculate_velocity(track_data['box'], detection['box'], frame.shape)
+                    
+                    # Smooth the velocity update
+                    if 'velocity' in track_data:
+                        old_dx, old_dy = track_data['velocity']
+                        new_dx, new_dy = new_velocity
+                        smoothed_dx = old_dx * (1 - self.tracking_settings['smooth_factor']) + new_dx * self.tracking_settings['smooth_factor']
+                        smoothed_dy = old_dy * (1 - self.tracking_settings['smooth_factor']) + new_dy * self.tracking_settings['smooth_factor']
+                        new_velocity = (smoothed_dx, smoothed_dy)
+                    
+                    # Smooth the position update while ensuring bounds
+                    old_box = track_data['box']
+                    new_box = detection['box']
+                    
+                    # Calculate smoothed box with bounds checking
+                    smoothed_box = (
+                        max(0, min(width - (new_box[2] - new_box[0]), 
+                            int(old_box[0] * (1 - self.tracking_settings['smooth_factor']) + 
+                                new_box[0] * self.tracking_settings['smooth_factor']))),
+                        max(0, min(height - (new_box[3] - new_box[1]), 
+                            int(old_box[1] * (1 - self.tracking_settings['smooth_factor']) + 
+                                new_box[1] * self.tracking_settings['smooth_factor']))),
+                        min(width, max(new_box[2] - new_box[0], 
+                            int(old_box[2] * (1 - self.tracking_settings['smooth_factor']) + 
+                                new_box[2] * self.tracking_settings['smooth_factor']))),
+                        min(height, max(new_box[3] - new_box[1], 
+                            int(old_box[3] * (1 - self.tracking_settings['smooth_factor']) + 
+                                new_box[3] * self.tracking_settings['smooth_factor'])))
+                    )
+                    
+                    # Update track data with smoothed values
+                    updated_tracks[track_id] = {
+                        'box': smoothed_box,
+                        'name': detection['name'],
+                        'confidence': detection['confidence'] * self.tracking_settings['confidence_boost'],
+                        'frames': self.tracking_settings['cache_duration'],
+                        'velocity': new_velocity,
+                        'last_pos': ((smoothed_box[0] + smoothed_box[2])/2,
+                                   (smoothed_box[1] + smoothed_box[3])/2),
+                        'recognized': detection['recognized']
+                    }
+                else:
+                    # Use predicted position with decaying confidence
+                    track_data['confidence'] *= 0.95
+                    track_data['frames'] -= 1
+                    
+                    if track_data['frames'] > 0:
+                        # Update position based on velocity
+                        predicted_box = self.predict_face_position(track_data, frame.shape)
+                        if predicted_box:
+                            track_data['box'] = predicted_box
+                            track_data['last_pos'] = ((predicted_box[0] + predicted_box[2])/2,
+                                                    (predicted_box[1] + predicted_box[3])/2)
+                        updated_tracks[track_id] = track_data
+            else:
+                # Remove track if prediction fails
+                track_data['frames'] -= 1
+                if track_data['frames'] > 0:
+                    updated_tracks[track_id] = track_data
+        
+        # Second pass: Create new tracks for unmatched detections
+        for i, detection in enumerate(current_detections):
+            if i not in matched_detection_indices:
+                new_id = self.tracking_counter
+                self.tracking_counter += 1
+                
+                # Initialize new track
+                updated_tracks[new_id] = {
+                    'box': detection['box'],
+                    'name': detection['name'],
+                    'confidence': detection['confidence'],
+                    'frames': self.tracking_settings['cache_duration'],
+                    'velocity': (0, 0),  # Initial velocity
+                    'last_pos': ((detection['box'][0] + detection['box'][2])/2,
+                               (detection['box'][1] + detection['box'][3])/2),
+                    'recognized': detection['recognized']
+                }
+        
+        self.tracked_faces = updated_tracks
+
+    def calculate_iou(self, box1, box2):
+        """Calculate Intersection over Union for two bounding boxes"""
+        # box format: (left, top, right, bottom) - pixel coordinates
+        x_left = max(box1[0], box2[0])
+        y_top = max(box1[1], box2[1])
+        x_right = min(box1[2], box2[2])
+        y_bottom = min(box1[3], box2[3])
+
+        if x_right < x_left or y_bottom < y_top:
+            return 0.0
+
+        intersection_area = (x_right - x_left) * (y_bottom - y_top)
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union_area = box1_area + box2_area - intersection_area
+
+        if union_area == 0:
+             return 0.0
+
+        return intersection_area / union_area
+
+    def draw_detections(self, frame):
+        """Draw tracked face detections on the frame, skipping unknown faces"""
+        if frame is None or frame.size == 0:
+            return frame
+
+        # Draw tracked faces
+        for track_id, track_data in self.tracked_faces.items():
+            # Skip unknown faces
+            if track_data.get('name') == 'Unknown':
                 continue
                 
-            current_group = []
-            
-            for face2 in face_data[i+1:]:
-                if face2['path'] in processed:
-                    continue
-                    
-                similarity = self.compare_faces(face1['encoding'], face2['encoding'])
-                if similarity > self.face_similarity_threshold:
-                    if not current_group:
-                        current_group.append(face1)
-                    current_group.append(face2)
-                    processed.add(face2['path'])
-            
-            if current_group:
-                processed.add(face1['path'])
-                duplicates.append(current_group)
-        
-        if not duplicates:
-            print("No duplicate faces found!")
-            return
-        
-        # Handle duplicates
-        print(f"\nFound {len(duplicates)} groups of similar faces")
-        for group_idx, group in enumerate(duplicates, 1):
-            print(f"\nGroup {group_idx}:")
-            
-            # Show all faces in the group
-            for face in group:
-                print(f"\n  • {os.path.basename(face['path'])}")
-                print(f"    Detected: {datetime.fromtimestamp(face['timestamp']).strftime('%Y-%m-%d %H:%M:%S')}")
-                
-                # Display the face
-                img = cv2.imread(face['path'])
-                if img is not None:
-                    max_height = 300
-                    if img.shape[0] > max_height:
-                        scale = max_height / img.shape[0]
-                        img = cv2.resize(img, None, fx=scale, fy=scale)
-                    cv2.imshow("Similar Face (Press any key to continue)", img)
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
-            
-            while True:
-                action = input("\nWhat would you like to do with this group?\n"
-                             "1. Keep the most recent face\n"
-                             "2. Keep the highest quality face\n"
-                             "3. Keep all faces\n"
-                             "4. Delete all faces\n"
-                             "5. Skip this group\n"
-                             "Enter choice (1-5): ").strip()
-                
-                if action == '1':
-                    # Keep the most recent face
-                    most_recent = max(group, key=lambda x: x['timestamp'])
-                    for face in group:
-                        if face['path'] != most_recent['path']:
-                            try:
-                                os.remove(face['path'])
-                                print(f"✅ Deleted: {os.path.basename(face['path'])}")
-                            except Exception as e:
-                                print(f"❌ Error deleting {face['path']}: {e}")
-                    print(f"✅ Kept most recent face: {os.path.basename(most_recent['path'])}")
-                    break
-                    
-                elif action == '2':
-                    # Keep the highest quality face (based on image size as a simple metric)
-                    highest_quality = max(group, key=lambda x: os.path.getsize(x['path']))
-                    for face in group:
-                        if face['path'] != highest_quality['path']:
-                            try:
-                                os.remove(face['path'])
-                                print(f"✅ Deleted: {os.path.basename(face['path'])}")
-                            except Exception as e:
-                                print(f"❌ Error deleting {face['path']}: {e}")
-                    print(f"✅ Kept highest quality face: {os.path.basename(highest_quality['path'])}")
-                    break
-                    
-                elif action == '3':
-                    print("Keeping all faces in this group")
-                    break
-                    
-                elif action == '4':
-                    # Delete all faces in the group
-                    for face in group:
-                        try:
-                            os.remove(face['path'])
-                            print(f"✅ Deleted: {os.path.basename(face['path'])}")
-                        except Exception as e:
-                            print(f"❌ Error deleting {face['path']}: {e}")
-                    break
-                    
-                elif action == '5':
-                    print("Skipping this group")
-                    break
-                    
-                else:
-                    print("❌ Invalid choice, please try again")
+            box = track_data['box']
+            left, top, right, bottom = box
+
+            # Choose color based on recognition status
+            if track_data.get('recognized', False):
+                color = (0, 255, 0)  # Green for recognized faces
+                label_text = f"{track_data['name']} ({track_data['confidence']:.0f}%)"
+            else:
+                color = (0, 165, 255)  # Orange for detected but not recognized
+                label_text = f"Detecting... ({track_data['confidence']:.0f}%)"
+
+            thickness = self.box_thickness
+            cv2.rectangle(frame, (left, top), (right, bottom), color, thickness)
+
+            # Draw name label background
+            (text_width, text_height), _ = cv2.getTextSize(label_text, self.font, self.font_scale, self.font_thickness)
+
+            # Ensure label background is within frame bounds
+            label_bg_top = max(0, top - text_height - 10)
+            label_bg_bottom = top
+            label_bg_right = min(frame.shape[1], left + text_width + 10)
+
+            cv2.rectangle(frame, (left, label_bg_top), (label_bg_right, label_bg_bottom), color, -1)
+
+            # Draw name and confidence
+            cv2.putText(frame, label_text,
+                        (left + 5, top - 10), self.font, self.font_scale, (255, 255, 255), self.font_thickness)
+
+        return frame
 
     def show_person_images(self):
         """Display all images of a specific person"""
@@ -1659,102 +1415,35 @@ class VideoAnalyzer:
         except Exception as e:
             print(f"⚠️ Error saving historical data: {e}")
 
-    def assess_face_quality(self, face_image):
-        """Assess the quality of a face image"""
-        if face_image is None or face_image.size == 0:
-            return 0, "Invalid image"
-        
-        quality_score = 100
-        issues = []
-        
-        # Check image size
-        height, width = face_image.shape[:2]
-        if height < self.quality_metrics['min_face_size'] or width < self.quality_metrics['min_face_size']:
-            quality_score -= 20
-            issues.append("Face too small")
-        elif height > self.quality_metrics['max_face_size'] or width > self.quality_metrics['max_face_size']:
-            quality_score -= 10
-            issues.append("Face too large")
-        
-        # Check blur
-        gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
-        blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
-        if blur_score < self.quality_metrics['blur_threshold']:
-            quality_score -= 30
-            issues.append("Image too blurry")
-        
-        # Check lighting
-        avg_brightness = np.mean(gray)
-        if avg_brightness < self.quality_metrics['min_lighting']:
-            quality_score -= 20
-            issues.append("Image too dark")
-        elif avg_brightness > self.quality_metrics['max_lighting']:
-            quality_score -= 20
-            issues.append("Image too bright")
-        
-        # Check face angle (using facial landmarks)
-        try:
-            face_landmarks = face_recognition.face_landmarks(face_image)
-            if face_landmarks:
-                # Calculate face angle using eye positions
-                left_eye = np.mean(face_landmarks[0]['left_eye'], axis=0)
-                right_eye = np.mean(face_landmarks[0]['right_eye'], axis=0)
-                angle = np.degrees(np.arctan2(right_eye[1] - left_eye[1], right_eye[0] - left_eye[0]))
-                if abs(angle) > self.quality_metrics['max_angle']:
-                    quality_score -= 15
-                    issues.append(f"Face angle too large ({angle:.1f}°)")
-        except Exception:
-            quality_score -= 10
-            issues.append("Could not detect facial landmarks")
-        
-        return max(0, quality_score), issues
-
     def update_performance_metrics(self, frame_results, processing_time):
         """Update performance metrics with new frame results"""
         self.performance_metrics['total_frames_processed'] += 1
         
-        # Update face detection metrics
         faces_detected = len(frame_results.get('faces', []))
         self.performance_metrics['total_faces_detected'] += faces_detected
         
-        # Update recognition metrics
         recognized_faces = [f for f in frame_results.get('faces', []) if f.get('Recognized', False)]
         self.performance_metrics['total_faces_recognized'] += len(recognized_faces)
         
-        # Update confidence scores
         for face in frame_results.get('faces', []):
             if 'Face' in face and 'Confidence' in face['Face']:
                 self.performance_metrics['confidence_scores'].append(face['Face']['Confidence'])
         
-        # Update recognition times
         self.performance_metrics['recognition_times'].append(processing_time)
         
-        # Update daily stats with debug logging
         try:
             today = datetime.now().strftime('%Y-%m-%d')
-            print(f"📅 Updating stats for date: {today}")
-            print(f"📊 Current stats before update: {self.historical_data['daily_stats'][today]}")
-            
             self.historical_data['daily_stats'][today]['faces_detected'] += faces_detected
             self.historical_data['daily_stats'][today]['faces_recognized'] += len(recognized_faces)
             
-            # Calculate and update averages
             if self.performance_metrics['confidence_scores']:
                 avg_confidence = np.mean(self.performance_metrics['confidence_scores'])
                 self.historical_data['daily_stats'][today]['avg_confidence'] = avg_confidence
             
-            print(f"📈 Updated stats: {self.historical_data['daily_stats'][today]}")
-        except Exception as e:
-            print(f"⚠️ Error updating daily stats: {e}")
-            print(f"Current historical data structure: {self.historical_data}")
-        
-        # Save historical data periodically
-        if self.performance_metrics['total_frames_processed'] % 100 == 0:
-            try:
+            if self.performance_metrics['total_frames_processed'] % 100 == 0:
                 self.save_historical_data()
-                print("💾 Saved historical data")
-            except Exception as e:
-                print(f"⚠️ Error saving historical data: {e}")
+        except Exception as e:
+            print(f"Error updating metrics: {e}")
 
     def generate_performance_report(self):
         """Generate a comprehensive performance report"""
@@ -2137,8 +1826,8 @@ class VideoAnalyzer:
             for face in aws_faces:
                 face_id = face['FaceId']
                 external_id = face['ExternalImageId']
-                # Extract person name from external ID (format: person_name_uuid)
-                person_name = external_id.split('_')[0]
+                # Use the external ID directly as the person name
+                person_name = external_id
                 if person_name not in aws_face_map:
                     aws_face_map[person_name] = []
                 aws_face_map[person_name].append(face_id)
@@ -2150,11 +1839,19 @@ class VideoAnalyzer:
             for person_name, face_ids in aws_face_map.items():
                 if person_name not in self.face_mapping:
                     print(f"⚠️ Found person in AWS but not locally: {person_name}")
+                    # Check if we have any images for this person in the indexed directory
+                    person_images = []
+                    for img_file in os.listdir(self.indexed_dir):
+                        if img_file.startswith(person_name + '_'):
+                            img_path = os.path.join(self.indexed_dir, img_file)
+                            if os.path.exists(img_path):
+                                person_images.append(img_path)
+                    
                     # Create new entry in local mapping
                     self.face_mapping[person_name] = {
                         'uuid': str(uuid.uuid4()),
                         'face_ids': face_ids,
-                        'images': [],  # We can't recover the original images
+                        'images': person_images,  # Use found images if any
                         'created_at': datetime.now().isoformat(),
                         'last_updated': datetime.now().isoformat()
                     }
@@ -2177,7 +1874,7 @@ class VideoAnalyzer:
                         print(f"⚠️ Found {len(missing_in_aws)} faces locally but not in AWS for {person_name}")
                         # Remove these face IDs from local mapping
                         self.face_mapping[person_name]['face_ids'] = list(aws_face_ids)
-                        # Also remove corresponding images if they exist
+                        # Keep only images that exist
                         self.face_mapping[person_name]['images'] = [
                             img for img in self.face_mapping[person_name]['images']
                             if os.path.exists(img)
@@ -2204,17 +1901,84 @@ class VideoAnalyzer:
             else:
                 print("✅ Local mapping is in sync with AWS collection")
             
+            # Calculate summary
+            total_people = len(self.face_mapping)
+            total_faces = sum(len(data['face_ids']) for data in self.face_mapping.values())
+            total_images = sum(len(data['images']) for data in self.face_mapping.values())
+            
             # Print summary
             print("\n=== Collection Summary ===")
-            print(f"Total people: {len(self.face_mapping)}")
-            total_faces = sum(len(data['face_ids']) for data in self.face_mapping.values())
+            print(f"Total people: {total_people}")
             print(f"Total faces: {total_faces}")
+            print(f"Total images: {total_images}")
+            
+            return {
+                'success': True,
+                'changes_made': changes_made,
+                'total_people': total_people,
+                'total_faces': total_faces,
+                'total_images': total_images,
+                'aws_faces': len(aws_faces)
+            }
             
         except Exception as e:
             print(f"❌ Error syncing with AWS collection: {e}")
             if hasattr(e, 'response'):
                 print(f"AWS Response: {e.response}")
-            raise  # Re-raise the exception to handle it in the calling code
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def predict_face_position(self, track_data, frame_shape):
+        """Predict face position based on velocity and last position, ensuring it stays within frame bounds"""
+        if 'velocity' not in track_data or 'last_pos' not in track_data:
+            return None
+            
+        height, width = frame_shape[:2]
+        last_x, last_y = track_data['last_pos']
+        dx, dy = track_data['velocity']
+        
+        # Get original box dimensions
+        box = track_data['box']
+        box_w = box[2] - box[0]
+        box_h = box[3] - box[1]
+        
+        # Calculate new center position
+        new_x = last_x + (dx * width)  # Scale velocity by frame width
+        new_y = last_y + (dy * height)  # Scale velocity by frame height
+        
+        # Ensure the box stays within frame bounds
+        new_x = max(box_w/2, min(width - box_w/2, new_x))
+        new_y = max(box_h/2, min(height - box_h/2, new_y))
+        
+        # Calculate new box coordinates
+        left = int(new_x - box_w/2)
+        top = int(new_y - box_h/2)
+        right = int(new_x + box_w/2)
+        bottom = int(new_y + box_h/2)
+        
+        # Final bounds check
+        left = max(0, min(width - box_w, left))
+        top = max(0, min(height - box_h, top))
+        right = left + box_w
+        bottom = top + box_h
+        
+        return (left, top, right, bottom)
+
+    def calculate_velocity(self, old_box, new_box, frame_shape):
+        """Calculate velocity between two face positions"""
+        height, width = frame_shape[:2]
+        
+        # Calculate center points
+        old_center = ((old_box[0] + old_box[2])/2, (old_box[1] + old_box[3])/2)
+        new_center = ((new_box[0] + new_box[2])/2, (new_box[1] + new_box[3])/2)
+        
+        # Calculate velocity (normalized by frame size)
+        dx = (new_center[0] - old_center[0]) / width
+        dy = (new_center[1] - old_center[1]) / height
+        
+        return (dx, dy)
 
 class CollectionManagerGUI:
     def __init__(self, root, analyzer):
@@ -2236,6 +2000,13 @@ class CollectionManagerGUI:
                               style="Title.TLabel",
                               font=("Segoe UI", 24, "bold"))
         title_label.pack(side=tk.LEFT)
+        
+        # Add sync button to title frame
+        sync_btn = ttk.Button(title_frame, 
+                             text="Sync with AWS 🔄",
+                             style="Info.TButton",
+                             command=self.sync_with_aws)
+        sync_btn.pack(side=tk.RIGHT)
         
         # Configure styles
         self._configure_styles()
@@ -2292,22 +2063,15 @@ class CollectionManagerGUI:
                   style="Success.TButton",
                   command=self.capture_face_from_webcam).pack(fill=tk.X, pady=2)
         
-        ttk.Button(left_column, text="Register Faces (R)", 
-                  style="Info.TButton",
-                  command=self.register_faces).pack(fill=tk.X, pady=2)
-        
         # Right column buttons
         ttk.Button(right_column, text="Show Collection (S)", 
                   style="Info.TButton",
                   command=self.show_collection).pack(fill=tk.X, pady=2)
         
-        ttk.Button(right_column, text="Cleanup Duplicates (D)", 
-                  style="Warning.TButton",
-                  command=self.cleanup_duplicates).pack(fill=tk.X, pady=2)
-        
-        ttk.Button(right_column, text="Index Faces (I)", 
-                  style="Warning.TButton",
-                  command=self.index_faces).pack(fill=tk.X, pady=2)
+
+        ttk.Button(right_column, text="Register Faces (R)", 
+                  style="Info.TButton",
+                  command=self.register_faces).pack(fill=tk.X, pady=2)
         
         # Exit button at bottom
         ttk.Button(main_frame, text="Exit (Q)", 
@@ -2331,15 +2095,17 @@ class CollectionManagerGUI:
         self.root.bind('c', lambda e: self.capture_face_from_webcam())
         self.root.bind('r', lambda e: self.register_faces())
         self.root.bind('s', lambda e: self.show_collection())
-        self.root.bind('d', lambda e: self.cleanup_duplicates())
-        self.root.bind('i', lambda e: self.index_faces())  # Changed from 'u' to 'i'
         self.root.bind('q', lambda e: self.root.quit())
+        self.root.bind('y', lambda e: self.sync_with_aws())  # Add sync shortcut
         
         # Add tooltips
         self._add_tooltips()
         
         # Center window
         self.center_window()
+        
+        # Initial sync with AWS
+        self.sync_with_aws()
     
     def _configure_styles(self):
         """Configure ttk styles for the application"""
@@ -2393,17 +2159,18 @@ class CollectionManagerGUI:
         """Add tooltips to buttons"""
         tooltips = {
             "Process Video (V)": "Process a video file to detect and recognize faces",
-            "Capture Face (C)": "Capture a face from webcam for registration",
-            "Register Faces (R)": "Register multiple faces from a folder",
+            "Capture Face (C)": "Capture a face from webcam",
+            "Register Faces (R)": "Register faces from a folder",
             "Show Collection (S)": "View and manage the face collection",
-            "Cleanup Duplicates (D)": "Find and remove duplicate faces",
-            "Index Faces (I)": "Review and index unrecognized faces",  # Updated tooltip
-            "Exit (Q)": "Close the application"
+            "Cleanup Duplicates (D)": "Find and merge duplicate entries",
+            "Index Faces (I)": "Index unrecognized faces",
+            "Sync with AWS (Y)": "Sync collection with AWS Rekognition",
+            "Exit (Q)": "Exit the application"
         }
         
         def create_tooltip(widget, text):
             def show_tooltip(event):
-                tooltip = tk.Toplevel(self.root)
+                tooltip = tk.Toplevel()
                 tooltip.wm_overrideredirect(True)
                 tooltip.wm_geometry(f"+{event.x_root+10}+{event.y_root+10}")
                 
@@ -2417,8 +2184,9 @@ class CollectionManagerGUI:
                 def hide_tooltip():
                     tooltip.destroy()
                 
-                label.bind("<Leave>", lambda e: hide_tooltip())
-                tooltip.bind("<Leave>", lambda e: hide_tooltip())
+                widget.tooltip = tooltip
+                widget.bind("<Leave>", lambda e: hide_tooltip())
+                widget.bind("<ButtonPress>", lambda e: hide_tooltip())
             
             widget.bind("<Enter>", show_tooltip)
         
@@ -2450,289 +2218,87 @@ class CollectionManagerGUI:
         )
         if not video_path:
             return
-            
-        # Create progress window
-        progress_window = tk.Toplevel(self.root)
-        progress_window.title("Processing Video")
-        progress_window.geometry("400x200")
-        self.center_window(progress_window)
-        
-        ttk.Label(progress_window, text="Processing video...", 
-                 style="Header.TLabel").pack(pady=20)
-        
-        progress = ttk.Progressbar(progress_window, mode='indeterminate')
-        progress.pack(fill=tk.X, padx=20, pady=10)
-        progress.start()
-        
-        status_label = ttk.Label(progress_window, text="Initializing...")
-        status_label.pack(pady=10)
-        
+
+        # Create a new window for video display
+        video_window = tk.Toplevel(self.root)
+        video_window.title(f"Processing: {os.path.basename(video_path)}")
+        video_window.geometry("800x600")
+        self.center_window(video_window)
+
+        # Canvas to display video frames
+        video_canvas = tk.Canvas(video_window, bg='black')
+        video_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Status label
+        status_label = ttk.Label(video_window, text="Initializing...")
+        status_label.pack(side=tk.BOTTOM, fill=tk.X, pady=5)
+
+        # Store reference to PhotoImage to prevent garbage collection
+        video_canvas.image = None
+
+        def display_frame(frame, frame_num, total_frames):
+            """Callback function to display processed frames"""
+            if frame is None or frame.size == 0:
+                return
+
+            try:
+                # Convert OpenCV frame to PhotoImage
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+                # Resize image to fit canvas while maintaining aspect ratio
+                canvas_width = video_canvas.winfo_width()
+                canvas_height = video_canvas.winfo_height()
+
+                scale = min(canvas_width/img.width, canvas_height/img.height)
+                new_width = int(img.width * scale)
+                new_height = int(img.height * scale)
+
+                img = img.resize((new_width, new_height))
+
+                img_tk = ImageTk.PhotoImage(image=img)
+
+                # Update canvas
+                video_canvas.create_image(canvas_width//2, canvas_height//2,
+                                          image=img_tk, anchor=tk.CENTER)
+                video_canvas.image = img_tk  # Keep reference
+
+                # Update status label
+                status_label.config(text=f"Processing frame {frame_num}/{total_frames}...")
+
+            except Exception as e:
+                print(f"Error displaying frame: {e}")
+
         def process():
             try:
-                self.analyzer.process_video(video_path)
-                progress_window.destroy()
+                # Pass the display_frame callback to the analyzer
+                results = self.analyzer.process_video(video_path, progress_callback=display_frame)
+
+                # Processing finished
+                video_window.destroy()
                 self.show_message("Success", "Video processing complete!")
                 self.update_collection_info()
+
+                # Optionally display a report based on results
+                # self.show_video_report(results)
+
             except Exception as e:
-                progress_window.destroy()
+                video_window.destroy()
                 self.show_message("Error", str(e), "error")
-        
+
+        # Start processing in a separate thread
         threading.Thread(target=process, daemon=True).start()
 
-    def index_faces(self):
-        """Show face indexing dialog with similarity checking and auto-deletion of low-quality matches"""
-        faces = self.analyzer.list_unrecognized_faces()
-        if not faces:
-            self.show_message("No Faces", "No unrecognized faces found!", "warning")
-            return
-        
-        # Create indexing window
-        index_window = tk.Toplevel(self.root)
-        index_window.title("Index Faces")
-        index_window.geometry("1200x800")
-        self.center_window(index_window)
-        
-        # Face preview
-        preview_frame = ttk.LabelFrame(index_window, text="Face Preview", padding="10")
-        preview_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        
-        # Preview canvas
-        preview_canvas = tk.Canvas(preview_frame, width=400, height=400, bg='white')
-        preview_canvas.pack(fill=tk.BOTH, expand=True)
-        
-        # Face list
-        list_frame = ttk.LabelFrame(index_window, text="Unrecognized Faces", padding="10")
-        list_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
-        
-        # Add scrollbar to list
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        face_list = tk.Listbox(list_frame, height=20, width=40, yscrollcommand=scrollbar.set)
-        face_list.pack(fill=tk.BOTH, expand=True)
-        scrollbar.config(command=face_list.yview)
-        
-        # Face details and matches
-        details_frame = ttk.LabelFrame(index_window, text="Face Details & Matches", padding="10")
-        details_frame.grid(row=0, column=2, sticky="nsew", padx=10, pady=10)
-        
-        # Details text
-        details_text = tk.Text(details_frame, height=6, width=40, wrap=tk.WORD)
-        details_text.pack(fill=tk.X, expand=True)
-        
-        # Matches text
-        matches_text = tk.Text(details_frame, height=8, width=40, wrap=tk.WORD)
-        matches_text.pack(fill=tk.X, expand=True, pady=(10, 0))
-        
-        # Store current preview image and matches
-        current_preview = None
-        current_matches = None
-        current_face = None
-        
-        def show_preview(event):
-            nonlocal current_preview, current_matches, current_face
-            selection = face_list.curselection()
-            if not selection:
-                return
-            
-            face = faces[selection[0]]
-            current_face = face
-            
-            # Load and display image
-            img = cv2.imread(face['path'])
-            if img is not None:
-                # Convert to RGB for tkinter
-                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                
-                # Resize image to fit canvas while maintaining aspect ratio
-                canvas_width = preview_canvas.winfo_width()
-                canvas_height = preview_canvas.winfo_height()
-                
-                scale = min(canvas_width/img.shape[1], canvas_height/img.shape[0])
-                new_width = int(img.shape[1] * scale)
-                new_height = int(img.shape[0] * scale)
-                
-                img = cv2.resize(img, (new_width, new_height))
-                
-                # Convert to PhotoImage
-                img_tk = ImageTk.PhotoImage(image=Image.fromarray(img))
-                
-                # Update canvas
-                preview_canvas.delete("all")
-                preview_canvas.create_image(canvas_width//2, canvas_height//2, 
-                                          image=img_tk, anchor=tk.CENTER)
-                
-                # Keep reference
-                current_preview = img_tk
-            
-            # Update details
-            details = f"Filename: {face['filename']}\n"
-            details += f"Detected: {datetime.fromtimestamp(face['timestamp']).strftime('%Y-%m-%d %H:%M:%S')}\n"
-            details += f"Path: {face['path']}"
-            
-            details_text.delete(1.0, tk.END)
-            details_text.insert(tk.END, details)
-            
-            # Check for matches with lower threshold
-            matches = self.analyzer.check_existing_face(face['path'], threshold=60)
-            current_matches = matches
-            
-            # Update matches text and buttons
-            matches_text.delete(1.0, tk.END)
-            if matches:
-                matches_text.insert(tk.END, "Found potential matches:\n\n")
-                for match in matches:
-                    matches_text.insert(tk.END, f"• {match['name']} ({match['similarity']:.1f}%)\n")
-                create_match_buttons()
-            else:
-                matches_text.insert(tk.END, "No matches found even with 60% threshold.\nThis face will be deleted.")
-                # Clear any existing match buttons
-                for widget in details_frame.winfo_children():
-                    if isinstance(widget, ttk.Frame):
-                        widget.destroy()
-                
-                # Auto-delete face with no matches
-                try:
-                    os.remove(face['path'])
-                    face_list.delete(selection[0])
-                    faces.pop(selection[0])
-                    preview_canvas.delete("all")
-                    details_text.delete(1.0, tk.END)
-                    matches_text.delete(1.0, tk.END)
-                    self.show_message("Info", "Face deleted due to no matches found")
-                except Exception as e:
-                    self.show_message("Error", f"Error deleting face: {str(e)}", "error")
-        
-        face_list.bind('<<ListboxSelect>>', show_preview)
-        
-        # Populate list
-        for face in faces:
-            face_list.insert(tk.END, face['filename'])
-        
-        def add_to_match(match_name):
-            if not current_face:
-                return
-            
-            if self.analyzer.index_face(current_face['path'], match_name):
-                self.show_message("Success", f"Face added to {match_name}")
-                # Remove from list
-                selection = face_list.curselection()
-                if selection:
-                    face_list.delete(selection[0])
-                    faces.pop(selection[0])
-                # Clear preview and details
-                preview_canvas.delete("all")
-                details_text.delete(1.0, tk.END)
-                matches_text.delete(1.0, tk.END)
-                # Clear match buttons
-                for widget in details_frame.winfo_children():
-                    if isinstance(widget, ttk.Frame):
-                        widget.destroy()
-                self.update_collection_info()
-            else:
-                self.show_message("Error", "Failed to add face", "error")
-        
-        def create_match_buttons():
-            # Clear existing buttons
-            for widget in details_frame.winfo_children():
-                if isinstance(widget, ttk.Frame):
-                    widget.destroy()
-            
-            if current_matches:
-                btn_container = ttk.Frame(details_frame)
-                btn_container.pack(fill=tk.X, pady=5)
-                
-                for match in current_matches:
-                    ttk.Button(btn_container, 
-                             text=f"Add to {match['name']}",
-                             command=lambda m=match['name']: add_to_match(m)
-                             ).pack(side=tk.LEFT, padx=2)
-        
-        def index_as_new():
-            if not current_face:
-                self.show_message("No Selection", "Please select a face to index", "warning")
-                return
-            
-            # Create name entry dialog
-            name_dialog = tk.Toplevel(index_window)
-            name_dialog.title("Enter Person Name")
-            name_dialog.geometry("300x150")
-            self.center_window(name_dialog)
-            
-            ttk.Label(name_dialog, text="Enter name for this face:").pack(pady=10)
-            name_entry = ttk.Entry(name_dialog, width=30)
-            name_entry.pack(pady=10)
-            name_entry.focus()
-            
-            def do_index():
-                name = name_entry.get().strip()
-                if not name:
-                    self.show_message("Error", "Name cannot be empty", "error")
-                    return
-                
-                if self.analyzer.index_face(current_face['path'], name):
-                    self.show_message("Success", f"Face indexed as {name}")
-                    # Remove from list
-                    selection = face_list.curselection()
-                    if selection:
-                        face_list.delete(selection[0])
-                        faces.pop(selection[0])
-                    # Clear preview and details
-                    preview_canvas.delete("all")
-                    details_text.delete(1.0, tk.END)
-                    matches_text.delete(1.0, tk.END)
-                    # Clear match buttons
-                    for widget in details_frame.winfo_children():
-                        if isinstance(widget, ttk.Frame):
-                            widget.destroy()
-                    self.update_collection_info()
-                    name_dialog.destroy()
-                else:
-                    self.show_message("Error", "Failed to index face", "error")
-            
-            ttk.Button(name_dialog, text="Index", command=do_index).pack(pady=10)
-            name_entry.bind('<Return>', lambda e: do_index())
-        
-        def delete_current():
-            selection = face_list.curselection()
-            if not selection:
-                self.show_message("No Selection", "Please select a face to delete", "warning")
-                return
-            
-            if messagebox.askyesno("Confirm Delete", "Delete selected face?"):
-                face = faces[selection[0]]
-                try:
-                    os.remove(face['path'])
-                    face_list.delete(selection[0])
-                    faces.pop(selection[0])
-                    preview_canvas.delete("all")
-                    details_text.delete(1.0, tk.END)
-                    matches_text.delete(1.0, tk.END)
-                    # Clear match buttons
-                    for widget in details_frame.winfo_children():
-                        if isinstance(widget, ttk.Frame):
-                            widget.destroy()
-                    self.show_message("Success", "Face deleted")
-                except Exception as e:
-                    self.show_message("Error", f"Failed to delete face: {e}", "error")
-        
-        # Action buttons
-        btn_frame = ttk.Frame(index_window)
-        btn_frame.grid(row=1, column=0, columnspan=3, pady=10)
-        
-        ttk.Button(btn_frame, text="Index as New Person", command=index_as_new).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Delete Selected", command=delete_current).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Close", command=index_window.destroy).pack(side=tk.LEFT, padx=5)
-        
-        # Configure grid weights
-        index_window.grid_columnconfigure(0, weight=2)
-        index_window.grid_columnconfigure(1, weight=1)
-        index_window.grid_columnconfigure(2, weight=1)
-        index_window.grid_rowconfigure(0, weight=1)
+        # Handle window closing
+        def on_closing():
+            # Optional: Add confirmation dialog
+            # if messagebox.askokcancel("Quit", "Do you want to stop video processing?"):
+            #     # Signal processing thread to stop if needed (requires changes in VideoAnalyzer)
+            video_window.destroy()
 
-    def recheck_faces(self):
-        """This method is now integrated into index_faces"""
-        self.index_faces()
+        video_window.protocol("WM_DELETE_WINDOW", on_closing)
+
+        # Set focus to the video window
+        video_window.focus_set()
 
     def show_collection(self):
         """Display the face collection with a clean, modern interface"""
@@ -2812,8 +2378,18 @@ class CollectionManagerGUI:
             action_frame = ttk.Frame(right_panel)
             action_frame.pack(fill=tk.X, pady=(0, 10))
             
-            delete_btn = ttk.Button(action_frame, text="Delete Person", state=tk.DISABLED)
+            # Create a frame for delete buttons
+            delete_frame = ttk.Frame(action_frame)
+            delete_frame.pack(side=tk.LEFT, padx=(0, 5))
+            
+            delete_btn = ttk.Button(delete_frame, text="Delete Person", state=tk.DISABLED)
             delete_btn.pack(side=tk.LEFT, padx=(0, 5))
+            
+            delete_all_btn = ttk.Button(delete_frame, 
+                                      text="Delete All Users",
+                                      style="Danger.TButton",
+                                      command=lambda: self._delete_all_users(collection_window))
+            delete_all_btn.pack(side=tk.LEFT)
             
             # Faces grid
             faces_frame = ttk.LabelFrame(right_panel, text="Faces", padding="10")
@@ -3021,6 +2597,7 @@ class CollectionManagerGUI:
             
             # Configure button commands
             delete_btn.config(command=delete_selected_person)
+            delete_all_btn.config(command=lambda: self._delete_all_users(collection_window))
             refresh_btn.config(command=lambda: update_collection_display(search_var.get()))
             
             # Configure styles
@@ -3115,34 +2692,59 @@ class CollectionManagerGUI:
         self.root.mainloop()
 
     def capture_face_from_webcam(self):
-        """Launch webcam capture window"""
+        """Launch webcam capture window with improved face quality assessment"""
         # Create capture window
         capture_window = tk.Toplevel(self.root)
         capture_window.title("Capture Face")
-        capture_window.geometry("800x600")
+        capture_window.geometry("1000x800")  # Increased window size
         self.center_window(capture_window)
         
+        # Main container
+        main_container = ttk.Frame(capture_window)
+        main_container.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        
         # Preview frame
-        preview_frame = ttk.LabelFrame(capture_window, text="Webcam Preview", padding="10")
-        preview_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        preview_frame = ttk.LabelFrame(main_container, text="Webcam Preview", padding="10")
+        preview_frame.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         
         # Preview canvas
         preview_canvas = tk.Canvas(preview_frame, width=640, height=480, bg='black')
         preview_canvas.pack(fill=tk.BOTH, expand=True)
         
+        # Quality metrics frame
+        metrics_frame = ttk.LabelFrame(main_container, text="Face Quality Metrics", padding="10")
+        metrics_frame.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
+        
+        # Create metric labels
+        metric_labels = {}
+        metrics = ['sharpness', 'size', 'brightness', 'contrast', 'angle', 'occlusion']
+        for i, metric in enumerate(metrics):
+            ttk.Label(metrics_frame, text=f"{metric.title()}:").grid(row=i, column=0, sticky="w", pady=2)
+            metric_labels[metric] = ttk.Label(metrics_frame, text="--")
+            metric_labels[metric].grid(row=i, column=1, sticky="w", pady=2)
+        
+        # Overall quality score
+        ttk.Separator(metrics_frame, orient='horizontal').grid(row=len(metrics), column=0, columnspan=2, sticky="ew", pady=10)
+        ttk.Label(metrics_frame, text="Overall Quality:").grid(row=len(metrics)+1, column=0, sticky="w", pady=2)
+        quality_label = ttk.Label(metrics_frame, text="--", font=('TkDefaultFont', 12, 'bold'))
+        quality_label.grid(row=len(metrics)+1, column=1, sticky="w", pady=2)
+        
+        # Issues list
+        issues_frame = ttk.LabelFrame(main_container, text="Quality Issues & Tips", padding="10")
+        issues_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=5, pady=5)
+        issues_text = tk.Text(issues_frame, height=4, wrap=tk.WORD, width=80)
+        issues_text.pack(fill=tk.BOTH, expand=True)
+        
         # Status frame
-        status_frame = ttk.Frame(capture_window)
-        status_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=5)
+        status_frame = ttk.Frame(main_container)
+        status_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=5)
         
         status_label = ttk.Label(status_frame, text="Press 'C' to capture, 'Q' to quit")
         status_label.pack(side=tk.LEFT)
         
-        quality_label = ttk.Label(status_frame, text="")
-        quality_label.pack(side=tk.RIGHT)
-        
         # Control frame
-        control_frame = ttk.Frame(capture_window)
-        control_frame.grid(row=2, column=0, sticky="ew", padx=10, pady=10)
+        control_frame = ttk.Frame(main_container)
+        control_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
         
         # Initialize webcam
         cap = cv2.VideoCapture(0)
@@ -3160,9 +2762,40 @@ class CollectionManagerGUI:
         face_detected = False
         face_box = None
         capture_running = True
+        last_quality_update = 0
+        quality_update_interval = 0.5  # Update quality metrics every 0.5 seconds
+        
+        def update_metrics(quality_score, issues, metrics):
+            """Update the quality metrics display"""
+            # Update individual metrics
+            for metric, value in metrics.items():
+                if metric in metric_labels:
+                    metric_labels[metric].config(text=f"{value:.0f}%")
+            
+            # Update overall quality
+            quality_label.config(text=f"{quality_score:.0f}%")
+            
+            # Update issues text
+            issues_text.delete(1.0, tk.END)
+            if issues:
+                issues_text.insert(tk.END, "\n".join(issues))
+            else:
+                issues_text.insert(tk.END, "No quality issues detected")
+            
+            # Set text color based on quality
+            if quality_score >= 80:
+                quality_label.config(foreground="green")
+            elif quality_score >= 60:
+                quality_label.config(foreground="orange")
+            else:
+                quality_label.config(foreground="red")
         
         def update_preview():
-            nonlocal current_frame, face_detected, face_box
+            nonlocal current_frame, face_detected, face_box, last_quality_update
+            
+            # Define metrics list and initialize quality_score at the start of the function
+            metrics = ['sharpness', 'size', 'brightness', 'contrast', 'angle', 'occlusion']
+            quality_score = 0  # Initialize quality_score
             
             if not capture_running:
                 return
@@ -3207,9 +2840,18 @@ class CollectionManagerGUI:
                     # Store face box for capture
                     face_box = (left, top, right, bottom)
                     
-                    # Assess face quality
-                    face_region = frame[top:bottom, left:right]
-                    quality_score, issues = self.analyzer.assess_face_quality(face_region)
+                    # Update quality metrics periodically
+                    current_time = time.time()
+                    if current_time - last_quality_update >= quality_update_interval:
+                        try:
+                            face_region = frame[top:bottom, left:right]
+                            quality_score, issues, metrics_dict = self.analyzer.assess_face_quality(face_region)
+                            update_metrics(quality_score, issues, metrics_dict)
+                            last_quality_update = current_time
+                        except Exception as e:
+                            print(f"Error assessing face quality: {e}")
+                            quality_score = 0
+                            update_metrics(0, ["Error assessing face quality"], {k: 0 for k in metrics})
                     
                     # Draw box with color based on quality
                     color = (0, 255, 0) if quality_score >= 60 else (0, 165, 255)
@@ -3219,17 +2861,12 @@ class CollectionManagerGUI:
                     cv2.putText(display_frame, f"Quality: {quality_score:.0f}%",
                               (left, top-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                     
-                    # Update quality label
-                    if issues:
-                        quality_label.config(text=f"Quality Issues: {', '.join(issues)}")
-                    else:
-                        quality_label.config(text="Face quality: Good")
-                
             except Exception as e:
                 print(f"Face detection error: {e}")
                 face_detected = False
                 face_box = None
-                quality_label.config(text="")
+                quality_score = 0
+                update_metrics(0, ["Error detecting face"], {k: 0 for k in metrics})
             
             # Convert to PhotoImage
             img = Image.fromarray(display_frame)
@@ -3252,11 +2889,11 @@ class CollectionManagerGUI:
             face_region = current_frame[top:bottom, left:right]
             
             # Assess quality
-            quality_score, issues = self.analyzer.assess_face_quality(face_region)
+            quality_score, issues, metrics = self.analyzer.assess_face_quality(face_region)
             if quality_score < 60:
                 if not messagebox.askyesno("Low Quality", 
-                    f"Face quality is low ({quality_score:.0f}%). Issues: {', '.join(issues)}\n"
-                    "Do you want to capture anyway?"):
+                    f"Face quality is low ({quality_score:.0f}%).\n\nIssues:\n" + 
+                    "\n".join(issues) + "\n\nDo you want to capture anyway?"):
                     return
             
             # Save face image
@@ -3309,12 +2946,12 @@ class CollectionManagerGUI:
             capture_window.destroy()
         
         # Bind keyboard shortcuts
-        capture_window.bind('c', lambda e: capture_face())
+        capture_window.bind('space', lambda e: capture_face())
         capture_window.bind('q', lambda e: on_closing())
         capture_window.protocol("WM_DELETE_WINDOW", on_closing)
         
         # Add control buttons
-        ttk.Button(control_frame, text="Capture (C)", 
+        ttk.Button(control_frame, text="Capture (Space)", 
                   command=capture_face).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Quit (Q)", 
                   command=on_closing).pack(side=tk.LEFT, padx=5)
@@ -3322,28 +2959,270 @@ class CollectionManagerGUI:
         # Configure grid weights
         capture_window.grid_columnconfigure(0, weight=1)
         capture_window.grid_rowconfigure(0, weight=1)
+        main_container.grid_columnconfigure(0, weight=3)
+        main_container.grid_columnconfigure(1, weight=1)
+        main_container.grid_rowconfigure(0, weight=3)
+        main_container.grid_rowconfigure(1, weight=1)
         
         # Start preview
         update_preview()
 
-    def cleanup_duplicates(self):
-        """Launch cleanup duplicates dialog"""
-        if not self.analyzer.face_mapping:
-            self.show_message("Empty Collection", "No faces in collection!", "warning")
+    def register_faces(self):
+        """Launch register faces from folder dialog with GUI interface"""
+        # Select folder
+        folder_path = filedialog.askdirectory(title="Select Folder with Face Images")
+        if not folder_path:
             return
         
-        if messagebox.askyesno("Cleanup Collection", 
-            "This will search for and help merge duplicate entries in the collection.\n"
-            "Would you like to proceed?"):
-            self.analyzer.cleanup_duplicate_entries()
+        # Get all image files from the folder
+        image_files = []
+        for ext in ('.jpg', '.jpeg', '.png'):
+            image_files.extend([f for f in os.listdir(folder_path) if f.lower().endswith(ext)])
+        
+        if not image_files:
+            self.show_message("No Images", "No image files found in the selected folder!", "warning")
+            return
+        
+        # Create registration window
+        reg_window = tk.Toplevel(self.root)
+        reg_window.title("Register Faces from Folder")
+        reg_window.geometry("1200x800")
+        self.center_window(reg_window)
+        
+        # Preview frame
+        preview_frame = ttk.LabelFrame(reg_window, text="Face Preview", padding="10")
+        preview_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
+        
+        # Preview canvas with scrollbar
+        canvas_frame = ttk.Frame(preview_frame)
+        canvas_frame.pack(fill=tk.BOTH, expand=True)
+        
+        canvas = tk.Canvas(canvas_frame, bg='white')
+        scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
+        
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Options frame
+        options_frame = ttk.LabelFrame(reg_window, text="Registration Options", padding="10")
+        options_frame.grid(row=0, column=1, sticky="nsew", padx=10, pady=10)
+        
+        # Registration mode
+        mode_var = tk.StringVar(value="same")
+        ttk.Label(options_frame, text="Registration Mode:").pack(anchor="w", pady=(0, 5))
+        ttk.Radiobutton(options_frame, text="All faces belong to same person", 
+                        variable=mode_var, value="same").pack(anchor="w")
+        ttk.Radiobutton(options_frame, text="Select faces for each person", 
+                        variable=mode_var, value="select").pack(anchor="w")
+        
+        # Name entry frame
+        name_frame = ttk.LabelFrame(options_frame, text="Person Name", padding="10")
+        name_frame.pack(fill="x", pady=10)
+        
+        name_var = tk.StringVar()
+        name_entry = ttk.Entry(name_frame, textvariable=name_var, width=30)
+        name_entry.pack(fill="x", pady=5)
+        
+        # Help text
+        help_label = ttk.Label(name_frame, 
+                              text="Enter name for selected faces",
+                              wraplength=200)
+        help_label.pack(fill="x", pady=5)
+        
+        # Status frame
+        status_frame = ttk.LabelFrame(reg_window, text="Status", padding="10")
+        status_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+        
+        status_text = tk.Text(status_frame, height=6, width=80, wrap=tk.WORD)
+        status_text.pack(fill="both", expand=True)
+        
+        # Store photo references and selection state
+        photo_references = []
+        selected_faces = set()
+        
+        def update_preview():
+            # Clear previous previews
+            for widget in scrollable_frame.winfo_children():
+                widget.destroy()
+            photo_references.clear()
+            
+            # Create grid of face previews
+            row = 0
+            col = 0
+            max_cols = 4
+            
+            for i, image_file in enumerate(image_files):
+                image_path = os.path.join(folder_path, image_file)
+                try:
+                    # Load and resize image
+                    img = cv2.imread(image_path)
+                    if img is None:
+                        continue
+                        
+                    # Convert to RGB
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    
+                    # Resize maintaining aspect ratio
+                    max_size = 200
+                    h, w = img.shape[:2]
+                    scale = min(max_size/w, max_size/h)
+                    new_size = (int(w*scale), int(h*scale))
+                    img = cv2.resize(img, new_size)
+                    
+                    # Convert to PhotoImage
+                    photo = ImageTk.PhotoImage(image=Image.fromarray(img))
+                    photo_references.append(photo)
+                    
+                    # Create frame for this face
+                    face_frame = ttk.Frame(scrollable_frame)
+                    face_frame.grid(row=row, column=col, padx=5, pady=5)
+                    
+                    # Add selection checkbox
+                    selected = image_path in selected_faces
+                    var = tk.BooleanVar(value=selected)
+                    
+                    def on_select(path=image_path, var=var):
+                        if var.get():
+                            selected_faces.add(path)
+                        else:
+                            selected_faces.discard(path)
+                        update_register_button()
+                    
+                    checkbox = ttk.Checkbutton(face_frame, variable=var, 
+                                             command=lambda p=image_path, v=var: on_select(p, v))
+                    checkbox.pack()
+                    
+                    # Add image
+                    img_label = ttk.Label(face_frame, image=photo)
+                    img_label.pack()
+                    
+                    # Add filename
+                    ttk.Label(face_frame, text=os.path.basename(image_file),
+                             wraplength=200).pack()
+                    
+                    # Update grid position
+                    col += 1
+                    if col >= max_cols:
+                        col = 0
+                        row += 1
+                        
+                except Exception as e:
+                    print(f"Error loading {image_file}: {e}")
+        
+        def update_register_button():
+            # Enable/disable register button based on selection and name
+            if mode_var.get() == "same":
+                register_btn.config(state=tk.NORMAL if name_var.get().strip() else tk.DISABLED)
+            else:
+                register_btn.config(state=tk.NORMAL if selected_faces and name_var.get().strip() else tk.DISABLED)
+        
+        def update_help(*args):
+            if mode_var.get() == "same":
+                help_label.config(text="Enter the name for all faces")
+                # Clear selection
+                selected_faces.clear()
+                update_preview()
+            else:
+                help_label.config(text="Select faces and enter name for the selected person")
+            update_register_button()
+        
+        # Update when mode changes
+        mode_var.trace("w", update_help)
+        name_var.trace("w", lambda *args: update_register_button())
+        
+        def register_faces():
+            mode = mode_var.get()
+            name = name_var.get().strip()
+            
+            if not name:
+                self.show_message("Error", "Please enter a name", "error")
+                return
+            
+            # Process images
+            successful = 0
+            failed = 0
+            skipped = 0
+            
+            status_text.delete(1.0, tk.END)
+            status_text.insert(tk.END, "Processing faces...\n\n")
+            reg_window.update()
+            
+            # Get list of images to process
+            if mode == "same":
+                images_to_process = [os.path.join(folder_path, f) for f in image_files]
+            else:
+                images_to_process = list(selected_faces)
+            
+            for image_path in images_to_process:
+                # Check if person exists
+                if name in self.analyzer.face_mapping:
+                    if not messagebox.askyesno("Person Exists",
+                        f"{name} already exists in collection.\n"
+                        "Would you like to add these faces to this person?"):
+                        skipped += 1
+                        status_text.insert(tk.END, f"Skipped {os.path.basename(image_path)} (person exists)\n")
+                        continue
+                
+                # Try to index the face
+                if self.analyzer.index_face(image_path, name):
+                    successful += 1
+                    status_text.insert(tk.END, f"Added {os.path.basename(image_path)} as {name}\n")
+                else:
+                    failed += 1
+                    status_text.insert(tk.END, f"Failed to add {os.path.basename(image_path)}\n")
+                
+                reg_window.update()
+            
+            # Show summary
+            status_text.insert(tk.END, f"\nRegistration complete!\n")
+            status_text.insert(tk.END, f"Successfully registered: {successful}\n")
+            status_text.insert(tk.END, f"Failed to register: {failed}\n")
+            status_text.insert(tk.END, f"Skipped: {skipped}\n")
+            
+            # Update collection info
             self.update_collection_info()
-
-    def register_faces(self):
-        """Launch register faces from folder dialog"""
-        folder_path = filedialog.askdirectory(title="Select Folder with Face Images")
-        if folder_path:
-            self.analyzer.register_faces_from_folder()
-            self.update_collection_info()
+            
+            # Clear selection and name for next person
+            if mode == "select":
+                selected_faces.clear()
+                name_var.set("")
+                update_preview()
+                update_register_button()
+            else:
+                # Enable close button if in same person mode
+                close_btn.config(state=tk.NORMAL)
+        
+        # Action buttons
+        btn_frame = ttk.Frame(reg_window)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        register_btn = ttk.Button(btn_frame, text="Register Faces", 
+                                 command=register_faces,
+                                 state=tk.DISABLED)
+        register_btn.pack(side=tk.LEFT, padx=5)
+        
+        close_btn = ttk.Button(btn_frame, text="Close", 
+                              command=reg_window.destroy,
+                              state=tk.DISABLED)
+        close_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Configure grid weights
+        reg_window.grid_columnconfigure(0, weight=2)
+        reg_window.grid_columnconfigure(1, weight=1)
+        reg_window.grid_rowconfigure(0, weight=1)
+        
+        # Initial preview
+        update_preview()
+        update_help()  # Initial help text
 
     def update_collection_info(self):
         """Update the collection information display"""
@@ -3445,6 +3324,120 @@ class CollectionManagerGUI:
         
         # Wait for window to be closed
         self.root.wait_window(msg_window)
+
+    def sync_with_aws(self):
+        """Sync the local collection with AWS Rekognition"""
+        try:
+            # Show syncing message
+            self.status_label.config(text="Syncing with AWS...")
+            self.root.update()
+            
+            # Perform sync
+            result = self.analyzer.sync_collection()
+            
+            if result['success']:
+                # Update collection info
+                self.update_collection_info()
+                
+                # Show success message with details
+                message = (
+                    f"Successfully synced with AWS!\n\n"
+                    f"Total People: {result.get('total_people', 0)}\n"
+                    f"Total Faces: {result.get('total_faces', 0)}\n"
+                    f"AWS Faces: {result.get('aws_faces', 0)}\n\n"
+                    f"Changes made:\n"
+                )
+                
+                # Add change details if available
+                if 'added' in result:
+                    message += f"- Added: {result['added']}\n"
+                if 'removed' in result:
+                    message += f"- Removed: {result['removed']}\n"
+                if 'updated' in result:
+                    message += f"- Updated: {result['updated']}\n"
+                
+                self.show_message("Sync Complete", message, "info")
+            else:
+                self.show_message(
+                    "Sync Failed",
+                    f"Error syncing with AWS: {result.get('error', 'Unknown error')}",
+                    "error"
+                )
+                
+        except Exception as e:
+            self.show_message(
+                "Sync Error",
+                f"Unexpected error during sync: {str(e)}",
+                "error"
+            )
+        finally:
+            self.status_label.config(text="Ready")
+
+    def _delete_all_users(self, parent_window):
+        """Delete all users from the collection"""
+        if messagebox.askyesno(
+            "Delete All Users",
+            "This will delete ALL users and faces from the collection.\n"
+            "This action cannot be undone.\n\n"
+            "Are you sure you want to proceed?"):
+            try:
+                # Get all face IDs
+                all_face_ids = []
+                for person_data in self.analyzer.face_mapping.values():
+                    if 'face_ids' in person_data:
+                        all_face_ids.extend(person_data['face_ids'])
+                
+                # Delete all face IDs from AWS collection
+                if all_face_ids:
+                    try:
+                        self.analyzer.rekognition.delete_faces(
+                            CollectionId=self.analyzer.collection_id,
+                            FaceIds=all_face_ids
+                        )
+                    except Exception as e:
+                        print(f"Warning: Error deleting faces from AWS: {e}")
+                
+                # Remove all image files
+                for person_data in self.analyzer.face_mapping.values():
+                    # Handle both old and new format of face paths
+                    if 'face_paths' in person_data:
+                        # New format: face_paths dictionary
+                        for face_id, image_path in person_data['face_paths'].items():
+                            if image_path and os.path.exists(image_path):
+                                try:
+                                    os.remove(image_path)
+                                except Exception as e:
+                                    print(f"Warning: Could not delete file {image_path}: {e}")
+                    elif 'images' in person_data:
+                        # Old format: images list
+                        for image_path in person_data['images']:
+                            if image_path and os.path.exists(image_path):
+                                try:
+                                    os.remove(image_path)
+                                except Exception as e:
+                                    print(f"Warning: Could not delete file {image_path}: {e}")
+                
+                # Clear face mapping
+                self.analyzer.face_mapping.clear()
+                
+                # Save changes
+                self.analyzer.save_face_mapping()
+                
+                # Update display
+                self.update_collection_info()
+                
+                # Close collection window
+                parent_window.destroy()
+                
+                self.show_message("Success", "Successfully deleted all users from the collection")
+                
+            except Exception as e:
+                self.show_message(
+                    "Error", 
+                    f"Error deleting all users: {str(e)}\n\n"
+                    "Some files may have been deleted. Please check the collection status.",
+                    "error"
+                )
 
 def main():
     root = tk.Tk()

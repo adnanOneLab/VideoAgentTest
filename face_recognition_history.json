@@ -1,19 +1,19 @@
 {
   "daily_stats": {
-    "2025-05-20": {
-      "faces_detected": 152,
-      "faces_recognized": 98,
+    "2025-05-23": {
+      "faces_detected": 162,
+      "faces_recognized": 18,
       "false_positives": 0,
       "false_negatives": 0,
-      "avg_confidence": 97.95353382512143,
+      "avg_confidence": 92.68984982996811,
       "avg_quality": 0
     },
-    "2025-05-21": {
-      "faces_detected": 152,
-      "faces_recognized": 98,
+    "2025-05-26": {
+      "faces_detected": 936,
+      "faces_recognized": 126,
       "false_positives": 0,
       "false_negatives": 0,
-      "avg_confidence": 97.95353382512143,
+      "avg_confidence": 96.62278250760811,
       "avg_quality": 0
     }
   }
