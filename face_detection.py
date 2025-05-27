@@ -2116,8 +2116,6 @@ class CollectionManagerGUI:
         # Center window
         self.center_window()
         
-        # Initial sync with AWS
-        self.sync_with_aws()
     
     def _configure_styles(self):
         """Configure ttk styles for the application"""

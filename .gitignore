@@ -45,3 +45,10 @@ venv.bak/
 # Jupyter Notebook
 .ipynb_checkpoints
 *.ipynb
+
+# Project-specific ignores
+blueprint_gui.py
+blueprint_mapping.py
+face_detection2.py
+store.png
+*.mp4
