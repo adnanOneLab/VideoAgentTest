@@ -1,0 +1,86 @@
+{
+  "blueprint": {
+    "image_path": "C:/Users/Admin/Documents/Facial-Recognition-Mall/FacialRecognition-Tool/store.png",
+    "scale_factor": 0.8333333333333334
+  },
+  "cameras": {
+    "cam001": {
+      "position": [
+        296.4,
+        108.0
+      ],
+      "orientation": -105.25511870305775,
+      "fov_angle": 70,
+      "fov_range": 100
+    }
+  },
+  "stores": {
+    "store001": {
+      "name": "Mentha",
+      "category": "Chocolate",
+      "polygon": [
+        [
+          99.6,
+          126.39999999999998
+        ],
+        [
+          280.4,
+          125.59999999999998
+        ],
+        [
+          278.79999999999995,
+          227.19999999999996
+        ],
+        [
+          93.99999999999999,
+          222.39999999999998
+        ]
+      ],
+      "is_mapped": true
+    },
+    "store002": {
+      "name": "BathyBody",
+      "category": "Skincare",
+      "polygon": [
+        [
+          92.39999999999999,
+          225.5999999999999
+        ],
+        [
+          278.0,
+          229.59999999999997
+        ],
+        [
+          281.2,
+          322.3999999999999
+        ],
+        [
+          94.8,
+          324.0
+        ]
+      ],
+      "is_mapped": true
+    }
+  },
+  "calibration": {
+    "perspective_matrix": [
+      [
+        -0.014931312429482495,
+        3.141942566998477,
+        -198.0957853753403
+      ],
+      [
+        -1.803648643694058,
+        4.246909324010632,
+        -199.35132922618504
+      ],
+      [
+        -0.002251370470736307,
+        0.0014978333084516846,
+        1.0
+      ]
+    ],
+    "blueprint_points": null,
+    "video_points": null
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "blueprint": {
+    "image_path": "C:/Users/Admin/Documents/Facial-Recognition-Mall/FacialRecognition-Tool/store.png",
+    "scale_factor": 0.8333333333333334
+  },
+  "cameras": {
+    "cam001": {
+      "position": [
+        300.4,
+        104.79999999999997
+      ],
+      "orientation": -110.55604521958347,
+      "fov_angle": 70,
+      "fov_range": 100
+    }
+  },
+  "stores": {
+    "store001": {
+      "name": "Mentha",
+      "category": "Chocolates",
+      "polygon": [
+        [
+          97.99999999999999,
+          126.39999999999998
+        ],
+        [
+          274.8,
+          125.59999999999998
+        ],
+        [
+          277.2,
+          221.59999999999988
+        ],
+        [
+          102.0,
+          221.59999999999988
+        ],
+        [
+          100.39999999999998,
+          213.5999999999999
+        ]
+      ],
+      "is_mapped": true
+    },
+    "store002": {
+      "name": "BathBody",
+      "category": "Skincare",
+      "polygon": [
+        [
+          97.19999999999999,
+          226.39999999999986
+        ],
+        [
+          276.4,
+          228.79999999999987
+        ],
+        [
+          278.79999999999995,
+          323.2
+        ],
+        [
+          97.99999999999999,
+          322.3999999999999
+        ]
+      ],
+      "is_mapped": true
+    }
+  },
+  "calibration": {
+    "perspective_matrix": [
+      [
+        -0.13267956398897754,
+        2.860326094762284,
+        -187.18446515354557
+      ],
+      [
+        -1.7618643457980838,
+        3.5870527261336678,
+        -119.12858463231098
+      ],
+      [
+        -0.0024283204110298927,
+        0.0010949805212680202,
+        1.0
+      ]
+    ],
+    "blueprint_points": null,
+    "video_points": null
+  },
+  "test_results": {
+    "total_stores": 2,
+    "mapped_stores": 2,
+    "mapping_status": {
+      "store001": {
+        "name": "Mentha",
+        "is_mapped": true,
+        "calibration_points": null
+      },
+      "store002": {
+        "name": "BathBody",
+        "is_mapped": true,
+        "calibration_points": null
+      }
+    }
+  }
+}

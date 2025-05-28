@@ -15,6 +15,14 @@
       "false_negatives": 0,
       "avg_confidence": 96.62278250760811,
       "avg_quality": 0
+    },
+    "2025-05-27": {
+      "faces_detected": 576,
+      "faces_recognized": 78,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "avg_confidence": 91.55752236502511,
+      "avg_quality": 0
     }
   }
 }

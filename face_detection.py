@@ -25,14 +25,25 @@ class VideoAnalyzer:
         self.rekognition = boto3.client('rekognition', region_name='ap-south-1')
         self.collection_id = 'my-face-collection'
         
+        # Video quality settings - focus on larger size for better face visibility
+        self.video_settings = {
+            'target_width': 2560,    # Increased target width for larger display
+            'target_height': 1440,   # Increased target height for larger display
+            'min_width': 1920,       # Increased minimum width
+            'min_height': 1080,      # Increased minimum height
+            'frame_skip': 10,         # Keep frame skip at 3 for smooth tracking
+            'quality_factor': 95,    # Keep high quality
+            'upscale_factor': 2.0    # Increased upscale factor for small faces
+        }
+        
         # Recognition settings with improved thresholds
         self.recognition_settings = {
-            'default_threshold': 70,      # Lowered threshold for more matches
-            'min_confidence': 80,         # Lowered minimum confidence for detection
+            'default_threshold': 75,      # Increased threshold for better accuracy
+            'min_confidence': 85,         # Increased minimum confidence
             'max_faces': 10,             # Keep max faces for better coverage
-            'quality_threshold': 60,      # Lowered quality threshold
+            'quality_threshold': 70,      # Increased quality threshold
             'tracking_cache_time': 30,    # Number of frames to cache recognized faces
-            'min_tracking_confidence': 75  # Lowered minimum confidence for tracking cache
+            'min_tracking_confidence': 80  # Increased minimum confidence for tracking
         }
         
         # Face tracking cache
@@ -450,22 +461,35 @@ class VideoAnalyzer:
             return 0.0
 
     def process_video(self, video_path, progress_callback=None):
-        """Process a video file with optional progress callback"""
+        """Process a video file with focus on larger display size"""
         if not os.path.exists(video_path):
             raise FileNotFoundError(f"Video file not found: {video_path}")
-
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"Could not open video file: {video_path}")
 
+        # Get original video properties
+        orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        
+        # Always upscale to target size while maintaining aspect ratio
+        aspect_ratio = orig_width / orig_height
+        if aspect_ratio > 1:
+            # Landscape video
+            target_width = self.video_settings['target_width']
+            target_height = int(target_width / aspect_ratio)
+        else:
+            # Portrait video
+            target_height = self.video_settings['target_height']
+            target_width = int(target_height * aspect_ratio)
 
         # Get video properties
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
         frame_count = 0
 
-        # Reset tracking and performance metrics for the new video
+        # Reset tracking and performance metrics
         self.tracked_faces = {}
         self.tracking_counter = 0
         self.performance_metrics = {
@@ -485,9 +509,9 @@ class VideoAnalyzer:
         output_filename = os.path.basename(video_path).split('.')[0] + '_analyzed.mp4'
         output_path = os.path.join(output_dir, output_filename)
 
-        # Define video writer
+        # Define video writer with high quality settings
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))))
+        out = cv2.VideoWriter(output_path, fourcc, fps, (target_width, target_height))
 
         try:
             while True:
@@ -495,7 +519,11 @@ class VideoAnalyzer:
                 if not ret:
                     break
 
-                if frame_count % self.frame_skip == 0:
+                # Always resize to target size using INTER_CUBIC for better quality
+                frame = cv2.resize(frame, (target_width, target_height), 
+                                 interpolation=cv2.INTER_CUBIC)
+
+                if frame_count % self.video_settings['frame_skip'] == 0:
                     self.analyze_frame(frame)
 
                 self.update_tracked_faces(frame)
@@ -518,8 +546,13 @@ class VideoAnalyzer:
             'total_frames': total_frames,
             'processed_frames': frame_count,
             'faces_detected': self.performance_metrics['total_faces_detected'],
-            'faces_recognized': len(self.recognized_faces)
+            'faces_recognized': len(self.recognized_faces),
+            'resolution': f"{target_width}x{target_height}"
         }
+
+    def enhance_frame(self, frame):
+        """Simplified frame processing - just return the frame as is"""
+        return frame  # Return frame without any enhancement
 
     def analyze_frame(self, frame):
         """Analyze a single frame with optimized recognition and caching"""
@@ -529,11 +562,12 @@ class VideoAnalyzer:
             return {'faces': []}
 
         # Enhanced preprocessing
-        enhanced_frame, gray_frame = self.preprocess_frame(frame)
+        enhanced_frame = self.enhance_frame(frame)
 
         # Convert frame to JPEG bytes with higher quality
         try:
-            _, img_encoded = cv2.imencode('.jpg', enhanced_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            _, img_encoded = cv2.imencode('.jpg', enhanced_frame, 
+                                        [cv2.IMWRITE_JPEG_QUALITY, self.video_settings['quality_factor']])
             image_bytes = img_encoded.tobytes()
         except Exception as e:
             print(f"⚠️ Frame encoding error: {e}")
@@ -564,9 +598,9 @@ class VideoAnalyzer:
                 right = left + int(face_box['Width'] * width)
                 bottom = top + int(face_box['Height'] * height)
 
-                # Add padding to face region (20% on each side)
-                padding_x = int((right - left) * 0.2)
-                padding_y = int((bottom - top) * 0.2)
+                # Add padding to face region (30% on each side for better context)
+                padding_x = int((right - left) * 0.3)
+                padding_y = int((bottom - top) * 0.3)
                 
                 # Ensure the crop is within frame bounds with padding
                 left = max(0, left - padding_x)
@@ -582,32 +616,31 @@ class VideoAnalyzer:
                 if face_region.size == 0 or face_region.shape[0] < 20 or face_region.shape[1] < 20:
                     continue
 
-                # Ensure minimum face size
-                min_face_size = 100  # minimum pixels
+                # Ensure minimum face size and upscale if needed
+                min_face_size = 200  # increased minimum size
                 if face_region.shape[0] < min_face_size or face_region.shape[1] < min_face_size:
-                    # Resize small faces to minimum size
-                    face_region = cv2.resize(face_region, (min_face_size, min_face_size))
+                    # Upscale small faces
+                    scale = self.video_settings['upscale_factor']
+                    face_region = cv2.resize(face_region, None, 
+                                           fx=scale, fy=scale, 
+                                           interpolation=cv2.INTER_LANCZOS4)
 
                 # Additional preprocessing for face region
-                face_region = cv2.cvtColor(face_region, cv2.COLOR_BGR2RGB)  # Convert to RGB
+                face_region = self.enhance_frame(face_region)  # Apply enhancement to face region
                 
-                # Apply histogram equalization for better contrast
-                face_region_yuv = cv2.cvtColor(face_region, cv2.COLOR_RGB2YUV)
-                face_region_yuv[:,:,0] = cv2.equalizeHist(face_region_yuv[:,:,0])
-                face_region = cv2.cvtColor(face_region_yuv, cv2.COLOR_YUV2RGB)
-
-                # Convert back to BGR for saving
-                face_region_bgr = cv2.cvtColor(face_region, cv2.COLOR_RGB2BGR)
+                # Convert to RGB for AWS
+                face_region_rgb = cv2.cvtColor(face_region, cv2.COLOR_BGR2RGB)
 
                 # Encode face region with high quality
                 try:
-                    _, face_encoded = cv2.imencode('.jpg', face_region_bgr, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    _, face_encoded = cv2.imencode('.jpg', face_region_rgb, 
+                                                 [cv2.IMWRITE_JPEG_QUALITY, self.video_settings['quality_factor']])
                     face_bytes = face_encoded.tobytes()
                 except Exception as e:
                     print(f"⚠️ Face region encoding error: {e}")
                     continue
 
-                # Perform recognition directly with AWS Rekognition
+                # Perform recognition with AWS Rekognition
                 try:
                     recognize_response = self.rekognition.search_faces_by_image(
                         CollectionId=self.collection_id,
@@ -652,7 +685,6 @@ class VideoAnalyzer:
 
                 except Exception as e:
                     print(f"⚠️ Recognition error for detected face: {e}")
-                    # Add as unrecognized face
                     results['faces'].append({
                         'Face': {
                             'BoundingBox': face_box,

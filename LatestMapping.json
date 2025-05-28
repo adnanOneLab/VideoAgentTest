@@ -1,0 +1,121 @@
+{
+  "blueprint": {
+    "image_path": "C:/Users/Admin/Documents/Facial-Recognition-Mall/FacialRecognition-Tool/store.png",
+    "scale_factor": 0.8333333333333334
+  },
+  "cameras": {
+    "cam001": {
+      "position": [
+        300.4,
+        102.39999999999998
+      ],
+      "orientation": -101.76828893202065,
+      "fov_angle": 70,
+      "fov_range": 100
+    }
+  },
+  "stores": {
+    "store001": {
+      "name": "Mentha&Chocolate",
+      "category": "Chocolate",
+      "polygon": [
+        [
+          100.39999999999998,
+          123.19999999999999
+        ],
+        [
+          280.4,
+          125.59999999999998
+        ],
+        [
+          275.59999999999997,
+          225.5999999999999
+        ],
+        [
+          104.39999999999999,
+          226.39999999999986
+        ]
+      ],
+      "is_mapped": true
+    },
+    "store002": {
+      "name": "Bathy&Body",
+      "category": "Skincare",
+      "polygon": [
+        [
+          101.19999999999999,
+          227.19999999999996
+        ],
+        [
+          276.4,
+          227.19999999999996
+        ],
+        [
+          278.0,
+          325.59999999999997
+        ],
+        [
+          102.79999999999998,
+          325.59999999999997
+        ]
+      ],
+      "is_mapped": true
+    }
+  },
+  "calibration": {
+    "store_matrices": {
+      "store001": [
+        [
+          1.378551439542727,
+          3.8849415451255167,
+          234.8796786018357
+        ],
+        [
+          -1.6377601507403647,
+          5.242749749009545,
+          -192.65747485001913
+        ],
+        [
+          -0.001902705950041445,
+          0.0012942309171100467,
+          1.0
+        ]
+      ],
+      "store002": [
+        [
+          0.1517038080752355,
+          1.935804931834022,
+          -44.29734697124634
+        ],
+        [
+          -1.4139121187335264,
+          2.9441764435909863,
+          -60.74101442514893
+        ],
+        [
+          -0.001891317869831526,
+          0.0005443168136924588,
+          1.0
+        ]
+      ]
+    },
+    "blueprint_points": null,
+    "video_points": null
+  },
+  "test_results": {
+    "total_stores": 2,
+    "mapped_stores": 2,
+    "mapping_status": {
+      "store001": {
+        "name": "Mentha&Chocolate",
+        "is_mapped": true,
+        "calibration_points": null
+      },
+      "store002": {
+        "name": "Bathy&Body",
+        "is_mapped": true,
+        "calibration_points": null
+      }
+    }
+  }
+}
