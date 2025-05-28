@@ -29,6 +29,7 @@ from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QAction
 from blueprint_mapping import BlueprintProcessor
 from datetime import datetime
 from shapely.geometry import Polygon, Point
+import csv
 
 class CalibrationDialog(QMessageBox):
     """Dialog for camera calibration"""
@@ -530,7 +531,9 @@ class CCTVPreview(QWidget):
         self.aws_enabled = False
         self.detected_people = []  # List of current detected people with bounding boxes
         self.frame_count = 0
-        self.detection_interval = 29  # Process every 5th frame for performance
+        self.last_detection_time = 0  # Track last detection time
+        self.detection_interval = 1.0  # Process every 1 second
+        self.fps = 30  # Default FPS, will be updated when video is loaded
         
         # Store entry notification setup
         self.last_store_entry = None  # Track the last store entry
@@ -553,12 +556,21 @@ class CCTVPreview(QWidget):
         # Add person tracker
         self.person_tracker = PersonTracker()
         self.frame_number = 0
+        
+        # Track API usage for cost management
+        self.api_calls_count = 0
+        self.last_api_call_time = None
     
     def load_video(self, video_path):
         """Load a video file for testing"""
         self.video_capture = cv2.VideoCapture(video_path)
         if not self.video_capture.isOpened():
             return False
+        
+        # Get video FPS and update detection interval
+        self.fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+        if self.fps <= 0:
+            self.fps = 30  # Default to 30 FPS if not available
         
         # Read and display first frame
         ret, frame = self.video_capture.read()
@@ -568,6 +580,10 @@ class CCTVPreview(QWidget):
             self.update()
             # Reset to first frame
             self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.frame_number = 0
+            self.last_detection_time = 0
+            self.api_calls_count = 0
+            self.last_api_call_time = None
             return True
         return False
     
@@ -587,6 +603,27 @@ class CCTVPreview(QWidget):
         
         # Scale frame to fit widget while maintaining aspect ratio
         self.update_scaled_frame()
+        
+        # Calculate time since last detection
+        current_time = self.frame_number / self.fps
+        time_since_last_detection = current_time - self.last_detection_time
+        
+        # Process person detection if AWS is enabled and enough time has passed
+        if self.aws_enabled and time_since_last_detection >= self.detection_interval:
+            try:
+                detected_people = self.detect_people(frame)
+                self.last_detection_time = current_time
+                self.api_calls_count += 1
+                self.last_api_call_time = datetime.now()
+                
+                # Update person tracking
+                self.person_tracker.update(detected_people, self.stores, self.frame_number)
+                
+                # Log API usage
+                if self.api_calls_count % 10 == 0:  # Log every 10 calls
+                    print(f"AWS API calls: {self.api_calls_count} (Last call: {self.last_api_call_time})")
+            except Exception as e:
+                print(f"Error in person detection: {str(e)}")
         
         # Apply perspective transformation if available
         if self.stores:
@@ -610,47 +647,21 @@ class CCTVPreview(QWidget):
         self.frame_number += 1
         self.update()
     
-    def enable_aws_rekognition(self, aws_region='ap-south-1'):
-        """Enable AWS Rekognition using default credentials"""
-        try:
-            # Use default credentials with specified region
-            self.rekognition_client = boto3.client('rekognition', region_name=aws_region)
-            
-            # Test the connection
-            self.rekognition_client.detect_labels(
-                Image={'Bytes': cv2.imencode('.jpg', np.zeros((100, 100, 3), dtype=np.uint8))[1].tobytes()},
-                MaxLabels=1
-            )
-            
-            self.aws_enabled = True
-            self.status_message.emit("AWS Rekognition enabled successfully")
-            return True
-            
-        except ClientError as e:
-            self.aws_enabled = False
-            self.rekognition_client = None
-            self.status_message.emit(f"AWS Rekognition error: {str(e)}")
-            return False
-        except Exception as e:
-            self.aws_enabled = False
-            self.rekognition_client = None
-            self.status_message.emit(f"Error enabling AWS Rekognition: {str(e)}")
-            return False
-    
     def detect_people(self, frame):
         """Detect people in the frame using AWS Rekognition"""
         if not self.aws_enabled or self.rekognition_client is None:
             return []
         
         try:
-            # Convert frame to JPEG bytes
-            _, jpeg_bytes = cv2.imencode('.jpg', frame)
+            # Convert frame to JPEG bytes with reduced quality for cost optimization
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]  # Reduce quality to 85%
+            _, jpeg_bytes = cv2.imencode('.jpg', frame, encode_param)
             
-            # Call AWS Rekognition
+            # Call AWS Rekognition with optimized parameters
             response = self.rekognition_client.detect_labels(
                 Image={'Bytes': jpeg_bytes.tobytes()},
-                MaxLabels=10,
-                MinConfidence=70.0
+                MaxLabels=5,  # Reduced from 10 to 5 since we only care about people
+                MinConfidence=75.0  # Increased confidence threshold
             )
             
             # Filter for people and extract bounding boxes
@@ -658,7 +669,7 @@ class CCTVPreview(QWidget):
             for label in response['Labels']:
                 if label['Name'].lower() == 'person':
                     for instance in label.get('Instances', []):
-                        if instance['Confidence'] >= 70.0:  # Only include high confidence detections
+                        if instance['Confidence'] >= 75.0:  # Increased confidence threshold
                             bbox = instance['BoundingBox']
                             # Convert normalized coordinates to pixel coordinates
                             x = int(bbox['Left'] * frame.shape[1])
@@ -676,6 +687,37 @@ class CCTVPreview(QWidget):
         except Exception as e:
             print(f"Error in person detection: {str(e)}")
             return []
+    
+    def enable_aws_rekognition(self, aws_region='ap-south-1'):
+        """Enable AWS Rekognition using default credentials"""
+        try:
+            # Use default credentials with specified region
+            self.rekognition_client = boto3.client('rekognition', region_name=aws_region)
+            
+            # Test the connection with minimal API call
+            self.rekognition_client.detect_labels(
+                Image={'Bytes': cv2.imencode('.jpg', np.zeros((100, 100, 3), dtype=np.uint8))[1].tobytes()},
+                MaxLabels=1,
+                MinConfidence=90.0
+            )
+            
+            self.aws_enabled = True
+            self.api_calls_count = 0
+            self.last_api_call_time = None
+            self.status_message.emit("AWS Rekognition enabled successfully")
+            print("AWS Rekognition enabled - API calls will be made every 1 second")
+            return True
+            
+        except ClientError as e:
+            self.aws_enabled = False
+            self.rekognition_client = None
+            self.status_message.emit(f"AWS Rekognition error: {str(e)}")
+            return False
+        except Exception as e:
+            self.aws_enabled = False
+            self.rekognition_client = None
+            self.status_message.emit(f"Error enabling AWS Rekognition: {str(e)}")
+            return False
     
     def update_scaled_frame(self):
         """Scale the current frame to fit the widget while maintaining aspect ratio"""
@@ -741,7 +783,7 @@ class CCTVPreview(QWidget):
                     
                     # Draw small ID and store info
                     label = f"{person_id}|{store_name[:5]}"  # Truncate store name to 5 chars
-                    painter.setFont(QFont("Arial", 7))  # Smaller font size
+                    painter.setFont(QFont("Arial", 12))  # Smaller font size
                     painter.setPen(QColor(255, 255, 255))
                     # Draw text background
                     text_rect = painter.fontMetrics().boundingRect(label)
@@ -764,7 +806,7 @@ class CCTVPreview(QWidget):
                 painter.drawEllipse(QPoint(x, y), 5, 5)
                 
                 # Draw label
-                painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+                painter.setFont(QFont("Arial", 17, QFont.Weight.Bold))
                 painter.setPen(QColor(255, 255, 255))
                 # Draw text background
                 text = f"{i+1}. {self.calibration_point_labels[i]}"
@@ -841,7 +883,7 @@ class CCTVPreview(QWidget):
                             if "name" in store:
                                 centroid_x = int(np.mean([p[0] for p in video_polygon]))
                                 centroid_y = int(np.mean([p[1] for p in video_polygon]))
-                                painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+                                painter.setFont(QFont("Arial", 20, QFont.Weight.Bold))
                                 # Draw text background
                                 text_rect = painter.fontMetrics().boundingRect(store["name"])
                                 text_rect.moveCenter(QPoint(centroid_x, centroid_y))
@@ -1081,8 +1123,8 @@ class CCTVPreview(QWidget):
                                         
                                         text = store["name"]
                                         font = cv2.FONT_HERSHEY_SIMPLEX
-                                        font_scale = 0.5
-                                        thickness = 1
+                                        font_scale = 1.3
+                                        thickness = 2
                                         (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
                                         
                                         cv2.rectangle(frame_draw, 
@@ -1113,7 +1155,7 @@ class CCTVPreview(QWidget):
                                     
                                     label = f"{person_id}|{store_name[:5]}"
                                     font = cv2.FONT_HERSHEY_SIMPLEX
-                                    font_scale = 0.4
+                                    font_scale = 0.8
                                     thickness = 1
                                     (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
                                     
@@ -1130,7 +1172,7 @@ class CCTVPreview(QWidget):
                             if self.last_store_entry and self.store_entry_display_time > 0:
                                 text = f"Person {self.last_store_entry['person_id']} entered {self.last_store_entry['store_name']}"
                                 font = cv2.FONT_HERSHEY_SIMPLEX
-                                font_scale = 0.6
+                                font_scale = 0.8
                                 thickness = 1
                                 (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
                                 
@@ -1261,21 +1303,25 @@ class MainWindow(QMainWindow):
         self.camera_tool_btn = QPushButton("Add Camera")
         self.store_tool_btn = QPushButton("Define Store")
         self.calibrate_btn = QPushButton("Calibrate Camera")
-        self.test_mode_btn = QPushButton("Test Mapping")
         
         # Add tooltips
         self.select_tool_btn.setToolTip("Select and move cameras or stores")
         self.camera_tool_btn.setToolTip("Click to place camera, drag to set orientation")
         self.store_tool_btn.setToolTip("Click to create store polygon, double-click to complete")
         self.calibrate_btn.setToolTip("Calibrate camera view with blueprint")
-        self.test_mode_btn.setToolTip("Toggle test mode to see store boundaries in video")
         
         # Set fixed height for buttons
         button_height = 30
         for btn in [self.select_tool_btn, self.camera_tool_btn, 
-                   self.store_tool_btn, self.calibrate_btn, self.test_mode_btn]:
+                   self.store_tool_btn, self.calibrate_btn]:
             btn.setFixedHeight(button_height)
             tool_layout.addWidget(btn)
+        
+        # Add export blueprint button below tools
+        self.export_blueprint_btn = QPushButton("Export Blueprint")
+        self.export_blueprint_btn.setFixedHeight(button_height)
+        self.export_blueprint_btn.clicked.connect(self.export_data)
+        tool_layout.addWidget(self.export_blueprint_btn)
         
         # Add help text with scroll area
         help_group = QGroupBox("Help")
@@ -1345,21 +1391,13 @@ class MainWindow(QMainWindow):
         load_video_action.setToolTip("Load CCTV footage for testing")
         load_video_action.triggered.connect(self.load_video)
         
-        export_action = QAction("Export", self)
-        export_action.setToolTip("Export the mapping data to JSON")
-        export_action.triggered.connect(self.export_data)
-        
         load_mapping_action = QAction("Load Mapping", self)
         load_mapping_action.setToolTip("Load previously exported mapping data")
         load_mapping_action.triggered.connect(self.load_mapping_data)
         
         export_video_action = QAction("Export Video", self)
-        export_video_action.setToolTip("Export processed video with store boundaries")
+        export_video_action.setToolTip("Export processed video with store boundaries and person detection")
         export_video_action.triggered.connect(self.export_video)
-        
-        aws_action = QAction("Enable AWS", self)
-        aws_action.setToolTip("Enable AWS Rekognition for person detection")
-        aws_action.triggered.connect(self.enable_aws)
         
         export_log_action = QAction("Export Movement Log", self)
         export_log_action.setToolTip("Export person movement log")
@@ -1367,10 +1405,8 @@ class MainWindow(QMainWindow):
         
         toolbar.addAction(load_blueprint_action)
         toolbar.addAction(load_video_action)
-        toolbar.addAction(export_action)
         toolbar.addAction(load_mapping_action)
         toolbar.addAction(export_video_action)
-        toolbar.addAction(aws_action)
         toolbar.addAction(export_log_action)
         
         # Create status bar
@@ -1383,7 +1419,6 @@ class MainWindow(QMainWindow):
         self.camera_tool_btn.clicked.connect(lambda: self.blueprint_view.set_tool("camera"))
         self.store_tool_btn.clicked.connect(lambda: self.blueprint_view.set_tool("store"))
         self.calibrate_btn.clicked.connect(self.prepare_calibration)
-        self.test_mode_btn.clicked.connect(self.toggle_test_mode)
         
         self.blueprint_view.calibration_points_selected.connect(self.on_blueprint_calibration_points)
         self.video_preview.calibration_points_selected.connect(self.on_video_calibration_points)
@@ -1394,7 +1429,176 @@ class MainWindow(QMainWindow):
         # Add calibration state tracking
         self.calibration_blueprint_points = None
         self.current_calibration_store = None  # Track which store is being calibrated
+
+    def export_data(self):
+        """Export the mapping data"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Data", "", "JSON Files (*.json)"
+        )
+        if file_path:
+            try:
+                # Prepare data for export
+                export_data = {
+                    "blueprint": {
+                        "image_path": self.blueprint_view.blueprint_path if hasattr(self.blueprint_view, 'blueprint_path') else None,
+                        "scale_factor": self.blueprint_view.scale_factor if hasattr(self.blueprint_view, 'scale_factor') else 1.0
+                    },
+                    "cameras": {
+                        camera_id: {
+                            "position": camera["position"],
+                            "orientation": camera["orientation"],
+                            "fov_angle": camera.get("fov_angle", 70),
+                            "fov_range": camera.get("fov_range", 100)
+                        }
+                        for camera_id, camera in self.blueprint_view.cameras.items()
+                    },
+                    "stores": {
+                        store_id: {
+                            "name": store["name"],
+                            "category": store.get("category", ""),
+                            "polygon": store["polygon"],
+                            "is_mapped": store_id in self.blueprint_view.mapped_stores
+                        }
+                        for store_id, store in self.blueprint_view.stores.items()
+                    },
+                    "calibration": {
+                        "store_matrices": {
+                            store_id: matrix.tolist() for store_id, matrix in self.video_preview.store_perspective_matrices.items()
+                        },
+                        "blueprint_points": self.calibration_blueprint_points if self.calibration_blueprint_points else None,
+                        "video_points": self.video_preview.calibration_points if self.video_preview.calibration_points else None
+                    },
+                    "test_results": {
+                        "total_stores": len(self.blueprint_view.stores),
+                        "mapped_stores": len(self.blueprint_view.mapped_stores),
+                        "mapping_status": {
+                            store_id: {
+                                "name": store["name"],
+                                "is_mapped": store_id in self.blueprint_view.mapped_stores,
+                                "calibration_points": self.calibration_blueprint_points if store_id == self.current_calibration_store else None
+                            }
+                            for store_id, store in self.blueprint_view.stores.items()
+                        }
+                    }
+                }
+                
+                # Save to JSON file
+                with open(file_path, 'w') as f:
+                    json.dump(export_data, f, indent=2)
+                
+                self.statusBar.showMessage(f"Successfully exported data to: {file_path}")
+                QMessageBox.information(self, "Export Successful", 
+                    f"Mapping data has been exported to:\n{file_path}\n\n"
+                    f"Exported {len(export_data['stores'])} stores and {len(export_data['cameras'])} cameras.")
+            except Exception as e:
+                QMessageBox.critical(self, "Export Error", f"Failed to export data: {str(e)}")
+                self.statusBar.showMessage("Export failed")
+
+    def export_video(self):
+        """Handle video export request"""
+        if not self.video_preview.video_capture:
+            QMessageBox.warning(self, "Error", "Please load a video first")
+            return
         
+        if not self.video_preview.stores:
+            QMessageBox.warning(self, "Error", "Please define and map stores first")
+            return
+        
+        # Enable AWS Rekognition automatically for export
+        if not self.video_preview.aws_enabled:
+            if not self.video_preview.enable_aws_rekognition(aws_region='ap-south-1'):
+                QMessageBox.critical(self, "Error", "Failed to enable AWS Rekognition. Export cannot proceed.")
+                return
+        
+        # Get output file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Video", "", "Video Files (*.mp4)"
+        )
+        
+        if file_path:
+            # Ensure .mp4 extension
+            if not file_path.lower().endswith('.mp4'):
+                file_path += '.mp4'
+            
+            # Show progress dialog
+            progress = QProgressDialog("Exporting video...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setAutoClose(True)
+            progress.setAutoReset(True)
+            
+            # Connect status message to progress dialog
+            def update_progress(message):
+                if "Exporting video:" in message:
+                    try:
+                        percent = float(message.split(":")[1].strip().rstrip("%"))
+                        progress.setValue(int(percent))
+                    except:
+                        pass
+            
+            self.video_preview.status_message.connect(update_progress)
+            
+            # Start export
+            success = self.video_preview.export_video(file_path)
+            
+            if success:
+                QMessageBox.information(self, "Success", 
+                    f"Video exported successfully to:\n{file_path}")
+            else:
+                QMessageBox.critical(self, "Error", "Failed to export video")
+            
+            # Disconnect status message handler
+            self.video_preview.status_message.disconnect(update_progress)
+            
+            # Reset video to first frame after export
+            if self.video_preview.video_capture:
+                self.video_preview.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = self.video_preview.video_capture.read()
+                if ret:
+                    self.video_preview.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    self.video_preview.update_scaled_frame()
+                    self.video_preview.update()
+
+    def export_movement_log(self):
+        """Export the movement log of tracked people"""
+        if not hasattr(self.video_preview, 'person_tracker'):
+            QMessageBox.warning(self, "Error", "No movement data available")
+            return
+        
+        # Check if we have any movement data
+        has_movement_data = False
+        for person in self.video_preview.person_tracker.tracked_people.values():
+            if person['history']:
+                has_movement_data = True
+                break
+        
+        if not has_movement_data:
+            QMessageBox.warning(self, "Error", "No movement data available. Please export a video first to generate movement data.")
+            return
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Movement Log", "", "CSV Files (*.csv)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["Person ID", "Store Name", "Entry Time", "Frame Number"])
+                    
+                    for person_id, person in self.video_preview.person_tracker.tracked_people.items():
+                        for entry in person['history']:
+                            writer.writerow([
+                                person_id,
+                                entry['store_name'],
+                                entry['entry_time'],
+                                entry['frame']
+                            ])
+                
+                QMessageBox.information(self, "Success", 
+                    f"Movement log exported successfully to:\n{file_path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to export movement log: {str(e)}")
+
     def load_blueprint(self):
         """Load a blueprint image"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1405,7 +1609,7 @@ class MainWindow(QMainWindow):
                 self.statusBar.showMessage(f"Loaded blueprint: {file_path}")
             else:
                 QMessageBox.critical(self, "Error", "Failed to load blueprint image")
-    
+
     def load_video(self):
         """Load CCTV footage for testing"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1414,19 +1618,94 @@ class MainWindow(QMainWindow):
         if file_path:
             if self.video_preview.load_video(file_path):
                 self.statusBar.showMessage(f"Loaded video: {file_path}")
-                
-                # If we have mapping data, suggest testing
-                if self.video_preview.store_perspective_matrices:
-                    reply = QMessageBox.question(self, "Test Mapping",
-                        "Mapping data is available. Would you like to test the mapping with this video?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                    
-                    if reply == QMessageBox.StandardButton.Yes:
-                        self.test_mode_btn.setChecked(True)
-                        self.toggle_test_mode(True)
             else:
                 QMessageBox.critical(self, "Error", "Failed to load video file")
-    
+
+    def load_mapping_data(self):
+        """Load previously exported mapping data"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Mapping Data", "", "JSON Files (*.json)"
+        )
+        if not file_path:
+            return
+            
+        try:
+            with open(file_path, 'r') as f:
+                mapping_data = json.load(f)
+            
+            # Debug information
+            print(f"Loading mapping data from: {file_path}")
+            print(f"Found {len(mapping_data.get('stores', {}))} stores")
+            print(f"Found {len(mapping_data.get('cameras', {}))} cameras")
+            
+            # Load blueprint if path exists
+            if mapping_data.get("blueprint", {}).get("image_path"):
+                blueprint_path = mapping_data["blueprint"]["image_path"]
+                if os.path.exists(blueprint_path):
+                    if not self.blueprint_view.load_image(blueprint_path):
+                        QMessageBox.warning(self, "Warning", 
+                            "Could not load original blueprint image. Using current blueprint if available.")
+            
+            # Load stores first (needed for mapping status)
+            self.blueprint_view.stores = {
+                store_id: {
+                    "name": store["name"],
+                    "category": store.get("category", ""),
+                    "polygon": store["polygon"]
+                }
+                for store_id, store in mapping_data.get("stores", {}).items()
+            }
+            
+            # Update mapped stores status
+            self.blueprint_view.mapped_stores = {
+                store_id for store_id, store in mapping_data.get("stores", {}).items()
+                if store.get("is_mapped", False)
+            }
+            
+            # Load cameras
+            self.blueprint_view.cameras = {
+                camera_id: {
+                    "position": tuple(camera["position"]),
+                    "orientation": camera["orientation"],
+                    "fov_angle": camera.get("fov_angle", 70),
+                    "fov_range": camera.get("fov_range", 100)
+                }
+                for camera_id, camera in mapping_data.get("cameras", {}).items()
+            }
+            
+            # Load calibration data if available
+            calibration_data = mapping_data.get("calibration", {})
+            if calibration_data.get("store_matrices"):
+                self.video_preview.store_perspective_matrices = {
+                    store_id: np.array(matrix, dtype=np.float32) for store_id, matrix in calibration_data["store_matrices"].items()
+                }
+                print("Loaded perspective matrices for stores")
+            else:
+                print("No perspective matrices found in mapping data")
+            
+            # Copy stores to video preview
+            self.video_preview.stores = self.blueprint_view.stores.copy()
+            
+            # Update UI
+            self.blueprint_view.update()
+            self.video_preview.update()
+            self.statusBar.showMessage(f"Loaded mapping data from: {file_path}")
+            
+            # Show summary
+            QMessageBox.information(self, "Mapping Data Loaded",
+                f"Successfully loaded mapping data:\n\n"
+                f"• {len(self.blueprint_view.stores)} stores\n"
+                f"• {len(self.blueprint_view.cameras)} cameras\n"
+                f"• {len(self.blueprint_view.mapped_stores)} mapped stores\n"
+                f"• Perspective matrices: {len(self.video_preview.store_perspective_matrices)} stores\n"
+                f"• Matrix shapes: {[matrix.shape for matrix in self.video_preview.store_perspective_matrices.values()]}\n\n"
+                "You can now load a new video to test the mapping.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load mapping data: {str(e)}")
+            self.statusBar.showMessage("Failed to load mapping data")
+            print(f"Error loading mapping data: {str(e)}")
+
     def prepare_calibration(self):
         """Prepare for calibration by selecting a store"""
         if self.blueprint_view.blueprint_image is None or self.video_preview.current_frame is None:
@@ -1535,274 +1814,6 @@ class MainWindow(QMainWindow):
         self.calibration_blueprint_points = None
         self.current_calibration_store = None
         self.blueprint_view.update()
-    
-    def toggle_test_mode(self, enabled):
-        """Toggle test mode for store mapping visualization"""
-        if self.video_preview.current_frame is None:
-            QMessageBox.warning(self, "Error", "Please load a video first")
-            self.test_mode_btn.setChecked(False)
-            return
-        
-        if not self.video_preview.store_perspective_matrices:
-            QMessageBox.warning(self, "Error", "Please calibrate at least one store first")
-            self.test_mode_btn.setChecked(False)
-            return
-        
-        if not self.video_preview.stores:
-            QMessageBox.warning(self, "Error", "No stores defined for mapping")
-            self.test_mode_btn.setChecked(False)
-            return
-        
-        print(f"Toggling test mode: {enabled}")
-        print(f"Stores available: {len(self.video_preview.stores)}")
-        print(f"Perspective matrices available: {len(self.video_preview.store_perspective_matrices)}")
-        
-        self.video_preview.set_test_mode(enabled)
-        if enabled:
-            self.statusBar.showMessage("Test mode: Store boundaries are highlighted in video")
-        else:
-            self.statusBar.showMessage("Test mode disabled")
-    
-    def export_data(self):
-        """Export the mapping data"""
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Data", "", "JSON Files (*.json)"
-        )
-        if file_path:
-            try:
-                # Prepare data for export
-                export_data = {
-                    "blueprint": {
-                        "image_path": self.blueprint_view.blueprint_path if hasattr(self.blueprint_view, 'blueprint_path') else None,
-                        "scale_factor": self.blueprint_view.scale_factor if hasattr(self.blueprint_view, 'scale_factor') else 1.0
-                    },
-                    "cameras": {
-                        camera_id: {
-                            "position": camera["position"],
-                            "orientation": camera["orientation"],
-                            "fov_angle": camera.get("fov_angle", 70),
-                            "fov_range": camera.get("fov_range", 100)
-                        }
-                        for camera_id, camera in self.blueprint_view.cameras.items()
-                    },
-                    "stores": {
-                        store_id: {
-                            "name": store["name"],
-                            "category": store.get("category", ""),
-                            "polygon": store["polygon"],
-                            "is_mapped": store_id in self.blueprint_view.mapped_stores
-                        }
-                        for store_id, store in self.blueprint_view.stores.items()
-                    },
-                    "calibration": {
-                        "store_matrices": {
-                            store_id: matrix.tolist() for store_id, matrix in self.video_preview.store_perspective_matrices.items()
-                        },
-                        "blueprint_points": self.calibration_blueprint_points if self.calibration_blueprint_points else None,
-                        "video_points": self.video_preview.calibration_points if self.video_preview.calibration_points else None
-                    },
-                    "test_results": {
-                        "total_stores": len(self.blueprint_view.stores),
-                        "mapped_stores": len(self.blueprint_view.mapped_stores),
-                        "mapping_status": {
-                            store_id: {
-                                "name": store["name"],
-                                "is_mapped": store_id in self.blueprint_view.mapped_stores,
-                                "calibration_points": self.calibration_blueprint_points if store_id == self.current_calibration_store else None
-                            }
-                            for store_id, store in self.blueprint_view.stores.items()
-                        }
-                    }
-                }
-                
-                # Save to JSON file
-                with open(file_path, 'w') as f:
-                    json.dump(export_data, f, indent=2)
-                
-                self.statusBar.showMessage(f"Successfully exported data to: {file_path}")
-                QMessageBox.information(self, "Export Successful", 
-                    f"Mapping data has been exported to:\n{file_path}\n\n"
-                    f"Exported {len(export_data['stores'])} stores and {len(export_data['cameras'])} cameras.")
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Failed to export data: {str(e)}")
-                self.statusBar.showMessage("Export failed")
-
-    def load_mapping_data(self):
-        """Load previously exported mapping data"""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Load Mapping Data", "", "JSON Files (*.json)"
-        )
-        if not file_path:
-            return
-            
-        try:
-            with open(file_path, 'r') as f:
-                mapping_data = json.load(f)
-            
-            # Debug information
-            print(f"Loading mapping data from: {file_path}")
-            print(f"Found {len(mapping_data.get('stores', {}))} stores")
-            print(f"Found {len(mapping_data.get('cameras', {}))} cameras")
-            
-            # Load blueprint if path exists
-            if mapping_data.get("blueprint", {}).get("image_path"):
-                blueprint_path = mapping_data["blueprint"]["image_path"]
-                if os.path.exists(blueprint_path):
-                    if not self.blueprint_view.load_image(blueprint_path):
-                        QMessageBox.warning(self, "Warning", 
-                            "Could not load original blueprint image. Using current blueprint if available.")
-            
-            # Load stores first (needed for mapping status)
-            self.blueprint_view.stores = {
-                store_id: {
-                    "name": store["name"],
-                    "category": store.get("category", ""),
-                    "polygon": store["polygon"]
-                }
-                for store_id, store in mapping_data.get("stores", {}).items()
-            }
-            
-            # Update mapped stores status
-            self.blueprint_view.mapped_stores = {
-                store_id for store_id, store in mapping_data.get("stores", {}).items()
-                if store.get("is_mapped", False)
-            }
-            
-            # Load cameras
-            self.blueprint_view.cameras = {
-                camera_id: {
-                    "position": tuple(camera["position"]),
-                    "orientation": camera["orientation"],
-                    "fov_angle": camera.get("fov_angle", 70),
-                    "fov_range": camera.get("fov_range", 100)
-                }
-                for camera_id, camera in mapping_data.get("cameras", {}).items()
-            }
-            
-            # Load calibration data if available
-            calibration_data = mapping_data.get("calibration", {})
-            if calibration_data.get("store_matrices"):
-                self.video_preview.store_perspective_matrices = {
-                    store_id: np.array(matrix, dtype=np.float32) for store_id, matrix in calibration_data["store_matrices"].items()
-                }
-                print("Loaded perspective matrices for stores")
-            else:
-                print("No perspective matrices found in mapping data")
-            
-            # Copy stores to video preview
-            self.video_preview.stores = self.blueprint_view.stores.copy()
-            
-            # Update UI
-            self.blueprint_view.update()
-            self.video_preview.update()
-            self.statusBar.showMessage(f"Loaded mapping data from: {file_path}")
-            
-            # Show summary
-            QMessageBox.information(self, "Mapping Data Loaded",
-                f"Successfully loaded mapping data:\n\n"
-                f"• {len(self.blueprint_view.stores)} stores\n"
-                f"• {len(self.blueprint_view.cameras)} cameras\n"
-                f"• {len(self.blueprint_view.mapped_stores)} mapped stores\n"
-                f"• Perspective matrices: {len(self.video_preview.store_perspective_matrices)} stores\n"
-                f"• Matrix shapes: {[matrix.shape for matrix in self.video_preview.store_perspective_matrices.values()]}\n\n"
-                "You can now load a new video to test the mapping.")
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to load mapping data: {str(e)}")
-            self.statusBar.showMessage("Failed to load mapping data")
-            print(f"Error loading mapping data: {str(e)}")
-
-    def export_video(self):
-        """Handle video export request"""
-        if not self.video_preview.video_capture:
-            QMessageBox.warning(self, "Error", "Please load a video first")
-            return
-        
-        if not self.video_preview.stores:
-            QMessageBox.warning(self, "Error", "Please define and map stores first")
-            return
-        
-        # Get output file path
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Video", "", "Video Files (*.mp4)"
-        )
-        
-        if file_path:
-            # Ensure .mp4 extension
-            if not file_path.lower().endswith('.mp4'):
-                file_path += '.mp4'
-            
-            # Show progress dialog
-            progress = QProgressDialog("Exporting video...", "Cancel", 0, 100, self)
-            progress.setWindowModality(Qt.WindowModality.WindowModal)
-            progress.setAutoClose(True)
-            progress.setAutoReset(True)
-            
-            # Connect status message to progress dialog
-            def update_progress(message):
-                if "Exporting video:" in message:
-                    try:
-                        percent = float(message.split(":")[1].strip().rstrip("%"))
-                        progress.setValue(int(percent))
-                    except:
-                        pass
-            
-            self.video_preview.status_message.connect(update_progress)
-            
-            # Start export
-            success = self.video_preview.export_video(file_path)
-            
-            if success:
-                QMessageBox.information(self, "Success", 
-                    f"Video exported successfully to:\n{file_path}")
-            else:
-                QMessageBox.critical(self, "Error", "Failed to export video")
-            
-            # Disconnect status message handler
-            self.video_preview.status_message.disconnect(update_progress)
-            
-            # Reset video to first frame after export
-            if self.video_preview.video_capture:
-                self.video_preview.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = self.video_preview.video_capture.read()
-                if ret:
-                    self.video_preview.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    self.video_preview.update_scaled_frame()
-                    self.video_preview.update()
-
-    def enable_aws(self):
-        """Enable AWS Rekognition with default credentials"""
-        if self.video_preview.enable_aws_rekognition(aws_region='ap-south-1'):
-            QMessageBox.information(self, "Success", 
-                "AWS Rekognition enabled successfully.\n\n"
-                "Person detection is now active in the video preview.")
-        else:
-            QMessageBox.warning(self, "Error", 
-                "Failed to enable AWS Rekognition.\n\n"
-                "Please check your AWS credentials configuration.")
-
-    def export_movement_log(self):
-        """Export the movement log of tracked people"""
-        if not hasattr(self.video_preview, 'person_tracker'):
-            QMessageBox.warning(self, "Error", "No movement data available")
-            return
-        
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Movement Log", "", "CSV Files (*.csv)"
-        )
-        
-        if file_path:
-            try:
-                with open(file_path, 'w') as f:
-                    f.write("Person ID,Store Name,Entry Time,Frame Number\n")
-                    for person_id, person in self.video_preview.person_tracker.tracked_people.items():
-                        for entry in person['history']:
-                            f.write(f"{person_id},{entry['store_name']},{entry['entry_time']},{entry['frame']}\n")
-                
-                QMessageBox.information(self, "Success", 
-                    f"Movement log exported successfully to:\n{file_path}")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to export movement log: {str(e)}")
 
 def main():
     app = QApplication(sys.argv)

@@ -1,0 +1,76 @@
+{
+  "blueprint": {
+    "image_path": "C:/Users/Admin/Documents/Facial-Recognition-Mall/FacialRecognition-Tool/store.png",
+    "scale_factor": 0.8333333333333334
+  },
+  "cameras": {
+    "cam001": {
+      "position": [
+        297.99999999999994,
+        468.79999999999984
+      ],
+      "orientation": 99.46232220802553,
+      "fov_angle": 70,
+      "fov_range": 100
+    }
+  },
+  "stores": {
+    "store001": {
+      "name": "Gah",
+      "category": "lol",
+      "polygon": [
+        [
+          93.99999999999999,
+          125.59999999999998
+        ],
+        [
+          279.59999999999997,
+          124.8
+        ],
+        [
+          278.0,
+          226.39999999999986
+        ],
+        [
+          91.6,
+          226.39999999999986
+        ]
+      ],
+      "is_mapped": true
+    }
+  },
+  "calibration": {
+    "store_matrices": {
+      "store001": [
+        [
+          1.0205561304240531,
+          4.331636419920424,
+          237.13720440904004
+        ],
+        [
+          -0.6725066807270154,
+          6.017831745075494,
+          -435.48849439651985
+        ],
+        [
+          -0.000910572866745252,
+          0.0010719354539950505,
+          1.0
+        ]
+      ]
+    },
+    "blueprint_points": null,
+    "video_points": null
+  },
+  "test_results": {
+    "total_stores": 1,
+    "mapped_stores": 1,
+    "mapping_status": {
+      "store001": {
+        "name": "Gah",
+        "is_mapped": true,
+        "calibration_points": null
+      }
+    }
+  }
+}
