@@ -554,6 +554,62 @@ class CCTVPreview(QWidget):
         self.person_tracker = PersonTracker()
         self.frame_number = 0
     
+    def load_video(self, video_path):
+        """Load a video file for testing"""
+        self.video_capture = cv2.VideoCapture(video_path)
+        if not self.video_capture.isOpened():
+            return False
+        
+        # Read and display first frame
+        ret, frame = self.video_capture.read()
+        if ret:
+            self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            self.update_scaled_frame()
+            self.update()
+            # Reset to first frame
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            return True
+        return False
+    
+    def update_frame(self):
+        """Update the current frame from video"""
+        if self.video_capture is None or not self.is_exporting:
+            return
+        
+        ret, frame = self.video_capture.read()
+        if not ret:
+            self.is_exporting = False
+            self.status_message.emit("Export complete")
+            return
+        
+        # Convert to RGB for display
+        self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Scale frame to fit widget while maintaining aspect ratio
+        self.update_scaled_frame()
+        
+        # Apply perspective transformation if available
+        if self.stores:
+            try:
+                # Transform store polygons to video coordinates
+                for store_id, store in self.stores.items():
+                    if "polygon" in store and len(store["polygon"]) > 2:
+                        perspective_matrix = self.store_perspective_matrices.get(store_id)
+                        if perspective_matrix is None:
+                            continue
+                            
+                        points = np.array(store["polygon"], dtype=np.float32).reshape(-1, 1, 2)
+                        if perspective_matrix.shape != (3, 3):
+                            continue
+                        
+                        transformed = cv2.perspectiveTransform(points, perspective_matrix)
+                        store["video_polygon"] = [(int(p[0][0]), int(p[0][1])) for p in transformed]
+            except Exception as e:
+                print(f"Error in perspective transformation: {str(e)}")
+        
+        self.frame_number += 1
+        self.update()
+    
     def enable_aws_rekognition(self, aws_region='ap-south-1'):
         """Enable AWS Rekognition using default credentials"""
         try:
@@ -620,73 +676,6 @@ class CCTVPreview(QWidget):
         except Exception as e:
             print(f"Error in person detection: {str(e)}")
             return []
-    
-    def load_video(self, video_path):
-        """Load a video file for testing"""
-        self.video_capture = cv2.VideoCapture(video_path)
-        if not self.video_capture.isOpened():
-            return False
-        self.update_frame()
-        return True
-    
-    def update_frame(self):
-        """Update the current frame from video"""
-        if self.video_capture is None:
-            return
-        
-        ret, frame = self.video_capture.read()
-        if not ret:
-            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
-            ret, frame = self.video_capture.read()
-            if not ret:
-                return
-        
-        # Process frame for person detection if AWS is enabled
-        if self.aws_enabled:
-            self.frame_count += 1
-            if self.frame_count % self.detection_interval == 0:
-                detected_people = self.detect_people(frame)
-                # Update person tracking
-                self.tracked_people = self.person_tracker.update(
-                    detected_people, self.stores, self.frame_number
-                )
-        
-        self.frame_number += 1
-        
-        # Convert to RGB for display
-        self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        
-        # Scale frame to fit widget while maintaining aspect ratio
-        self.update_scaled_frame()
-        
-        # Apply perspective transformation if available
-        if self.stores:
-            try:
-                # Transform store polygons to video coordinates
-                for store_id, store in self.stores.items():
-                    if "polygon" in store and len(store["polygon"]) > 2:
-                        # Get the store's perspective matrix
-                        perspective_matrix = self.store_perspective_matrices.get(store_id)
-                        if perspective_matrix is None:
-                            continue
-                            
-                        # Convert points to numpy array with correct shape (N,1,2)
-                        points = np.array(store["polygon"], dtype=np.float32).reshape(-1, 1, 2)
-                        
-                        # Ensure perspective matrix is 3x3
-                        if perspective_matrix.shape != (3, 3):
-                            print(f"Warning: Invalid perspective matrix shape for store {store_id}: {perspective_matrix.shape}")
-                            continue
-                        
-                        # Transform points
-                        transformed = cv2.perspectiveTransform(points, perspective_matrix)
-                        
-                        # Store transformed points
-                        store["video_polygon"] = [(int(p[0][0]), int(p[0][1])) for p in transformed]
-            except Exception as e:
-                print(f"Error in perspective transformation: {str(e)}")
-        
-        self.update()
     
     def update_scaled_frame(self):
         """Scale the current frame to fit the widget while maintaining aspect ratio"""
@@ -1033,23 +1022,19 @@ class CCTVPreview(QWidget):
             
             # Process each frame
             frame_count = 0
-            last_frame_time = 0  # For timing verification
+            processed_frames = 0
             
             while frame_count < total_frames:
-                # Get current frame timestamp
-                current_time = self.video_capture.get(cv2.CAP_PROP_POS_MSEC) / 1000.0  # Convert to seconds
+                # Get current frame number
+                current_frame = int(self.video_capture.get(cv2.CAP_PROP_POS_FRAMES))
+                if current_frame != frame_count:
+                    # If we're not at the expected frame, seek to it
+                    self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count)
                 
                 ret, frame = self.video_capture.read()
                 if not ret:
-                    print(f"Warning: Could not read frame {frame_count} at time {current_time:.2f}s")
+                    print(f"Warning: Could not read frame {frame_count}")
                     break
-                
-                # Verify frame timing
-                if frame_count > 0:
-                    expected_time = frame_count / fps
-                    if abs(current_time - expected_time) > 0.1:  # More than 0.1s difference
-                        print(f"Warning: Frame timing mismatch at frame {frame_count}")
-                        print(f"Expected time: {expected_time:.2f}s, Actual time: {current_time:.2f}s")
                 
                 try:
                     # Create a copy for drawing
@@ -1164,6 +1149,7 @@ class CCTVPreview(QWidget):
                     
                     # Write frame
                     self.video_writer.write(frame_draw)
+                    processed_frames += 1
                     
                     # Update progress
                     frame_count += 1
@@ -1171,7 +1157,6 @@ class CCTVPreview(QWidget):
                     self.status_message.emit(f"Exporting video: {progress:.1f}%")
                     
                     self.frame_number += 1
-                    last_frame_time = current_time
                     
                 except Exception as e:
                     print(f"Error processing frame {frame_count}: {str(e)}")
@@ -1196,19 +1181,20 @@ class CCTVPreview(QWidget):
                 print(f"- FPS: {output_fps}")
                 print(f"- Total frames: {output_frames}")
                 print(f"- Duration: {output_duration:.2f} seconds")
+                print(f"- Processed frames: {processed_frames}")
                 
-                # Verify frame count and duration
+                # Verify frame count
                 if output_frames != total_frames:
-                    print(f"Error: Frame count mismatch - Input: {total_frames}, Output: {output_frames}")
+                    print(f"Error: Frame count mismatch - Input: {total_frames}, Output: {output_frames}, Processed: {processed_frames}")
                     # Delete the incorrect output file
                     os.remove(output_path)
-                    raise Exception("Frame count mismatch in output video")
+                    raise Exception(f"Frame count mismatch in output video (Input: {total_frames}, Output: {output_frames}, Processed: {processed_frames})")
                 
                 if abs(output_duration - duration) > 0.1:
                     print(f"Error: Duration mismatch - Input: {duration:.2f}s, Output: {output_duration:.2f}s")
                     # Delete the incorrect output file
                     os.remove(output_path)
-                    raise Exception("Duration mismatch in output video")
+                    raise Exception(f"Duration mismatch in output video (Input: {duration:.2f}s, Output: {output_duration:.2f}s)")
             else:
                 print("Warning: Could not verify output video properties")
                 raise Exception("Could not verify output video")
@@ -1408,7 +1394,7 @@ class MainWindow(QMainWindow):
         # Add calibration state tracking
         self.calibration_blueprint_points = None
         self.current_calibration_store = None  # Track which store is being calibrated
-    
+        
     def load_blueprint(self):
         """Load a blueprint image"""
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1764,7 +1750,9 @@ class MainWindow(QMainWindow):
             self.video_preview.status_message.connect(update_progress)
             
             # Start export
-            if self.video_preview.export_video(file_path):
+            success = self.video_preview.export_video(file_path)
+            
+            if success:
                 QMessageBox.information(self, "Success", 
                     f"Video exported successfully to:\n{file_path}")
             else:
@@ -1772,6 +1760,15 @@ class MainWindow(QMainWindow):
             
             # Disconnect status message handler
             self.video_preview.status_message.disconnect(update_progress)
+            
+            # Reset video to first frame after export
+            if self.video_preview.video_capture:
+                self.video_preview.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = self.video_preview.video_capture.read()
+                if ret:
+                    self.video_preview.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    self.video_preview.update_scaled_frame()
+                    self.video_preview.update()
 
     def enable_aws(self):
         """Enable AWS Rekognition with default credentials"""

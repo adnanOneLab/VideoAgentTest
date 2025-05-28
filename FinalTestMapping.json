@@ -1,0 +1,121 @@
+{
+  "blueprint": {
+    "image_path": "C:/Users/Admin/Documents/Facial-Recognition-Mall/FacialRecognition-Tool/store.png",
+    "scale_factor": 0.8333333333333334
+  },
+  "cameras": {
+    "cam001": {
+      "position": [
+        297.19999999999993,
+        106.39999999999998
+      ],
+      "orientation": -102.09475707701199,
+      "fov_angle": 70,
+      "fov_range": 100
+    }
+  },
+  "stores": {
+    "store001": {
+      "name": "Mentha",
+      "category": "chocolate",
+      "polygon": [
+        [
+          97.99999999999999,
+          124.8
+        ],
+        [
+          276.4,
+          123.19999999999999
+        ],
+        [
+          278.79999999999995,
+          223.9999999999999
+        ],
+        [
+          92.39999999999999,
+          223.9999999999999
+        ]
+      ],
+      "is_mapped": true
+    },
+    "store002": {
+      "name": "Bath&Body",
+      "category": "Skincare",
+      "polygon": [
+        [
+          97.99999999999999,
+          225.5999999999999
+        ],
+        [
+          275.59999999999997,
+          226.39999999999986
+        ],
+        [
+          278.0,
+          324.0
+        ],
+        [
+          96.39999999999999,
+          323.2
+        ]
+      ],
+      "is_mapped": true
+    }
+  },
+  "calibration": {
+    "store_matrices": {
+      "store001": [
+        [
+          0.577367403412525,
+          4.247742832761389,
+          285.5500474003295
+        ],
+        [
+          -1.6689516290773583,
+          5.754852597689711,
+          -235.71849915876322
+        ],
+        [
+          -0.0023219032695088815,
+          0.0015483758719119021,
+          1.0
+        ]
+      ],
+      "store002": [
+        [
+          0.309535118619575,
+          1.9244836878701013,
+          -69.16082849284703
+        ],
+        [
+          -1.2045584908460718,
+          2.5281829260872533,
+          3.3783123699124262
+        ],
+        [
+          -0.0014435712745361113,
+          0.00011765052266784904,
+          1.0
+        ]
+      ]
+    },
+    "blueprint_points": null,
+    "video_points": null
+  },
+  "test_results": {
+    "total_stores": 2,
+    "mapped_stores": 2,
+    "mapping_status": {
+      "store001": {
+        "name": "Mentha",
+        "is_mapped": true,
+        "calibration_points": null
+      },
+      "store002": {
+        "name": "Bath&Body",
+        "is_mapped": true,
+        "calibration_points": null
+      }
+    }
+  }
+}
