@@ -19,7 +19,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QMessageBox, QToolBar,
     QStatusBar, QDockWidget, QTextEdit, QSpinBox, QDoubleSpinBox,
     QComboBox, QGroupBox, QFormLayout, QTabWidget, QToolTip,
-    QSplitter, QFrame, QSizePolicy, QDialog, QLineEdit, QDialogButtonBox
+    QSplitter, QFrame, QSizePolicy, QDialog, QLineEdit, QDialogButtonBox,
+    QProgressDialog
 )
 from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal, QTimer
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QAction
@@ -362,6 +363,7 @@ class BlueprintView(QWidget):
 class CCTVPreview(QWidget):
     """Widget for displaying and testing CCTV footage"""
     calibration_points_selected = pyqtSignal(list)  # List of (x, y) points
+    status_message = pyqtSignal(str)  # Signal for status updates
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -385,6 +387,11 @@ class CCTVPreview(QWidget):
         self.timer = QTimer()
         self.timer.timeout.connect(self.update_frame)
         self.timer.start(33)  # ~30 FPS
+        
+        self.video_writer = None
+        self.is_exporting = False
+        self.export_progress = 0
+        self.total_frames = 0
     
     def load_video(self, video_path):
         """Load a video file for testing"""
@@ -711,6 +718,117 @@ class CCTVPreview(QWidget):
             self.setToolTip("CCTV footage preview with store detection")
         self.update()
 
+    def export_video(self, output_path):
+        """Export the processed video with drawings"""
+        if not self.video_capture or not self.current_frame is not None:
+            self.status_message.emit("Error: No video loaded")
+            return False
+        
+        try:
+            # Get video properties
+            frame_width = int(self.video_capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            frame_height = int(self.video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = self.video_capture.get(cv2.CAP_PROP_FPS)
+            self.total_frames = int(self.video_capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # Create video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            self.video_writer = cv2.VideoWriter(output_path, fourcc, fps, (frame_width, frame_height))
+            
+            if not self.video_writer.isOpened():
+                self.status_message.emit("Error: Could not create output video file")
+                return False
+            
+            # Reset video capture to beginning
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.is_exporting = True
+            self.export_progress = 0
+            
+            # Process each frame
+            while True:
+                ret, frame = self.video_capture.read()
+                if not ret:
+                    break
+                
+                # Convert to RGB for processing
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                
+                # Create a copy for drawing
+                frame_draw = frame.copy()
+                
+                # Draw store polygons
+                if self.stores:
+                    for store_id, store in self.stores.items():
+                        if "video_polygon" in store and len(store["video_polygon"]) > 2:
+                            try:
+                                # Convert points to numpy array
+                                points = np.array(store["video_polygon"], np.int32)
+                                points = points.reshape((-1, 1, 2))
+                                
+                                # Draw filled semi-transparent polygon
+                                overlay = frame_draw.copy()
+                                cv2.fillPoly(overlay, [points], (0, 255, 0, 50))
+                                cv2.addWeighted(overlay, 0.5, frame_draw, 0.5, 0, frame_draw)
+                                
+                                # Draw polygon outline
+                                cv2.polylines(frame_draw, [points], True, (0, 255, 0), 2)
+                                
+                                # Draw store name
+                                if "name" in store:
+                                    # Calculate centroid
+                                    centroid_x = int(np.mean([p[0] for p in store["video_polygon"]]))
+                                    centroid_y = int(np.mean([p[1] for p in store["video_polygon"]]))
+                                    
+                                    # Draw text background
+                                    text = store["name"]
+                                    font = cv2.FONT_HERSHEY_SIMPLEX
+                                    font_scale = 0.6
+                                    thickness = 2
+                                    (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
+                                    
+                                    # Draw background rectangle
+                                    cv2.rectangle(frame_draw, 
+                                                (centroid_x - text_width//2 - 5, centroid_y - text_height//2 - 5),
+                                                (centroid_x + text_width//2 + 5, centroid_y + text_height//2 + 5),
+                                                (0, 0, 0), -1)
+                                    
+                                    # Draw text
+                                    cv2.putText(frame_draw, text,
+                                              (centroid_x - text_width//2, centroid_y + text_height//2),
+                                              font, font_scale, (255, 255, 255), thickness)
+                            except Exception as e:
+                                print(f"Error drawing store {store_id}: {str(e)}")
+                
+                # Write frame
+                self.video_writer.write(frame_draw)
+                
+                # Update progress
+                self.export_progress += 1
+                progress = (self.export_progress / self.total_frames) * 100
+                self.status_message.emit(f"Exporting video: {progress:.1f}%")
+            
+            # Clean up
+            self.video_writer.release()
+            self.video_writer = None
+            self.is_exporting = False
+            self.export_progress = 0
+            
+            # Reset video capture
+            self.video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.update_frame()
+            
+            self.status_message.emit(f"Video exported successfully to: {output_path}")
+            return True
+            
+        except Exception as e:
+            if self.video_writer:
+                self.video_writer.release()
+                self.video_writer = None
+            self.is_exporting = False
+            self.export_progress = 0
+            self.status_message.emit(f"Error exporting video: {str(e)}")
+            return False
+
 class MainWindow(QMainWindow):
     """Main application window"""
     def __init__(self):
@@ -846,10 +964,15 @@ class MainWindow(QMainWindow):
         load_mapping_action.setToolTip("Load previously exported mapping data")
         load_mapping_action.triggered.connect(self.load_mapping_data)
         
+        export_video_action = QAction("Export Video", self)
+        export_video_action.setToolTip("Export processed video with store boundaries")
+        export_video_action.triggered.connect(self.export_video)
+        
         toolbar.addAction(load_blueprint_action)
         toolbar.addAction(load_video_action)
         toolbar.addAction(export_action)
         toolbar.addAction(load_mapping_action)
+        toolbar.addAction(export_video_action)
         
         # Create status bar
         self.statusBar = QStatusBar()
@@ -1189,6 +1312,53 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to load mapping data: {str(e)}")
             self.statusBar.showMessage("Failed to load mapping data")
             print(f"Error loading mapping data: {str(e)}")
+
+    def export_video(self):
+        """Handle video export request"""
+        if not self.video_preview.video_capture:
+            QMessageBox.warning(self, "Error", "Please load a video first")
+            return
+        
+        if not self.video_preview.stores:
+            QMessageBox.warning(self, "Error", "Please define and map stores first")
+            return
+        
+        # Get output file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Video", "", "Video Files (*.mp4)"
+        )
+        
+        if file_path:
+            # Ensure .mp4 extension
+            if not file_path.lower().endswith('.mp4'):
+                file_path += '.mp4'
+            
+            # Show progress dialog
+            progress = QProgressDialog("Exporting video...", "Cancel", 0, 100, self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
+            progress.setAutoClose(True)
+            progress.setAutoReset(True)
+            
+            # Connect status message to progress dialog
+            def update_progress(message):
+                if "Exporting video:" in message:
+                    try:
+                        percent = float(message.split(":")[1].strip().rstrip("%"))
+                        progress.setValue(int(percent))
+                    except:
+                        pass
+            
+            self.video_preview.status_message.connect(update_progress)
+            
+            # Start export
+            if self.video_preview.export_video(file_path):
+                QMessageBox.information(self, "Success", 
+                    f"Video exported successfully to:\n{file_path}")
+            else:
+                QMessageBox.critical(self, "Error", "Failed to export video")
+            
+            # Disconnect status message handler
+            self.video_preview.status_message.disconnect(update_progress)
 
 def main():
     app = QApplication(sys.argv)
