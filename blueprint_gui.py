@@ -14,6 +14,8 @@ import cv2
 import numpy as np
 import json
 import os
+import boto3
+from botocore.exceptions import ClientError
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QMessageBox, QToolBar,
@@ -380,6 +382,13 @@ class CCTVPreview(QWidget):
         self.setMinimumSize(640, 480)
         self.setToolTip("CCTV footage preview with store detection")
         
+        # AWS Rekognition setup
+        self.rekognition_client = None
+        self.aws_enabled = False
+        self.detected_people = []  # List of current detected people with bounding boxes
+        self.frame_count = 0
+        self.detection_interval = 29  # Process every 5th frame for performance
+        
         # Set size policy to allow widget to expand
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         
@@ -392,6 +401,73 @@ class CCTVPreview(QWidget):
         self.is_exporting = False
         self.export_progress = 0
         self.total_frames = 0
+    
+    def enable_aws_rekognition(self, aws_region='ap-south-1'):
+        """Enable AWS Rekognition using default credentials"""
+        try:
+            # Use default credentials with specified region
+            self.rekognition_client = boto3.client('rekognition', region_name=aws_region)
+            
+            # Test the connection
+            self.rekognition_client.detect_labels(
+                Image={'Bytes': cv2.imencode('.jpg', np.zeros((100, 100, 3), dtype=np.uint8))[1].tobytes()},
+                MaxLabels=1
+            )
+            
+            self.aws_enabled = True
+            self.status_message.emit("AWS Rekognition enabled successfully")
+            return True
+            
+        except ClientError as e:
+            self.aws_enabled = False
+            self.rekognition_client = None
+            self.status_message.emit(f"AWS Rekognition error: {str(e)}")
+            return False
+        except Exception as e:
+            self.aws_enabled = False
+            self.rekognition_client = None
+            self.status_message.emit(f"Error enabling AWS Rekognition: {str(e)}")
+            return False
+    
+    def detect_people(self, frame):
+        """Detect people in the frame using AWS Rekognition"""
+        if not self.aws_enabled or self.rekognition_client is None:
+            return []
+        
+        try:
+            # Convert frame to JPEG bytes
+            _, jpeg_bytes = cv2.imencode('.jpg', frame)
+            
+            # Call AWS Rekognition
+            response = self.rekognition_client.detect_labels(
+                Image={'Bytes': jpeg_bytes.tobytes()},
+                MaxLabels=10,
+                MinConfidence=70.0
+            )
+            
+            # Filter for people and extract bounding boxes
+            people = []
+            for label in response['Labels']:
+                if label['Name'].lower() == 'person':
+                    for instance in label.get('Instances', []):
+                        if instance['Confidence'] >= 70.0:  # Only include high confidence detections
+                            bbox = instance['BoundingBox']
+                            # Convert normalized coordinates to pixel coordinates
+                            x = int(bbox['Left'] * frame.shape[1])
+                            y = int(bbox['Top'] * frame.shape[0])
+                            width = int(bbox['Width'] * frame.shape[1])
+                            height = int(bbox['Height'] * frame.shape[0])
+                            confidence = instance['Confidence']
+                            people.append({
+                                'bbox': (x, y, width, height),
+                                'confidence': confidence
+                            })
+            
+            return people
+            
+        except Exception as e:
+            print(f"Error in person detection: {str(e)}")
+            return []
     
     def load_video(self, video_path):
         """Load a video file for testing"""
@@ -412,6 +488,12 @@ class CCTVPreview(QWidget):
             ret, frame = self.video_capture.read()
             if not ret:
                 return
+        
+        # Process frame for person detection if AWS is enabled
+        if self.aws_enabled:
+            self.frame_count += 1
+            if self.frame_count % self.detection_interval == 0:
+                self.detected_people = self.detect_people(frame)
         
         # Convert to RGB for display
         self.current_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -480,7 +562,7 @@ class CCTVPreview(QWidget):
         self.update()
     
     def paintEvent(self, event):
-        """Draw the video frame and store bounding boxes"""
+        """Draw the video frame and overlays"""
         if self.scaled_frame is None:
             return
         
@@ -491,6 +573,35 @@ class CCTVPreview(QWidget):
         qimage = QImage(self.scaled_frame.data, width, height,
                        self.scaled_frame.strides[0], QImage.Format.Format_RGB888)
         painter.drawImage(self.frame_offset_x, self.frame_offset_y, qimage)
+        
+        # Draw detected people
+        if self.aws_enabled and self.detected_people:
+            for person in self.detected_people:
+                x, y, w, h = person['bbox']
+                confidence = person['confidence']
+                
+                # Scale coordinates to widget size
+                scaled_x = int(x * self.scale_factor + self.frame_offset_x)
+                scaled_y = int(y * self.scale_factor + self.frame_offset_y)
+                scaled_w = int(w * self.scale_factor)
+                scaled_h = int(h * self.scale_factor)
+                
+                # Draw bounding box
+                painter.setPen(QPen(QColor(255, 0, 0), 2))
+                painter.drawRect(scaled_x, scaled_y, scaled_w, scaled_h)
+                
+                # Draw label with confidence
+                label = f"Person: {confidence:.1f}%"
+                painter.setFont(QFont("Arial", 10))
+                painter.setPen(QColor(255, 255, 255))
+                # Draw text background
+                text_rect = painter.fontMetrics().boundingRect(label)
+                text_rect.moveTop(scaled_y - text_rect.height())
+                text_rect.moveLeft(scaled_x)
+                text_rect.adjust(-2, -2, 2, 2)
+                painter.fillRect(text_rect, QColor(0, 0, 0, 180))
+                # Draw text
+                painter.drawText(scaled_x, scaled_y - 5, label)
         
         # Draw calibration points and lines if in calibration mode
         if self.calibration_mode:
@@ -750,11 +861,37 @@ class CCTVPreview(QWidget):
                 if not ret:
                     break
                 
-                # Convert to RGB for processing
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                
                 # Create a copy for drawing
                 frame_draw = frame.copy()
+                
+                # Process frame for person detection if AWS is enabled
+                if self.aws_enabled:
+                    detected_people = self.detect_people(frame)
+                    # Draw detected people
+                    for person in detected_people:
+                        x, y, w, h = person['bbox']
+                        confidence = person['confidence']
+                        
+                        # Draw bounding box
+                        cv2.rectangle(frame_draw, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                        
+                        # Draw label with confidence
+                        label = f"Person: {confidence:.1f}%"
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.6
+                        thickness = 2
+                        (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
+                        
+                        # Draw text background
+                        cv2.rectangle(frame_draw, 
+                                    (x, y - text_height - 5),
+                                    (x + text_width, y),
+                                    (0, 0, 0), -1)
+                        
+                        # Draw text
+                        cv2.putText(frame_draw, label,
+                                  (x, y - 5),
+                                  font, font_scale, (255, 255, 255), thickness)
                 
                 # Draw store polygons
                 if self.stores:
@@ -968,11 +1105,16 @@ class MainWindow(QMainWindow):
         export_video_action.setToolTip("Export processed video with store boundaries")
         export_video_action.triggered.connect(self.export_video)
         
+        aws_action = QAction("Enable AWS", self)
+        aws_action.setToolTip("Enable AWS Rekognition for person detection")
+        aws_action.triggered.connect(self.enable_aws)
+        
         toolbar.addAction(load_blueprint_action)
         toolbar.addAction(load_video_action)
         toolbar.addAction(export_action)
         toolbar.addAction(load_mapping_action)
         toolbar.addAction(export_video_action)
+        toolbar.addAction(aws_action)
         
         # Create status bar
         self.statusBar = QStatusBar()
@@ -1359,6 +1501,17 @@ class MainWindow(QMainWindow):
             
             # Disconnect status message handler
             self.video_preview.status_message.disconnect(update_progress)
+
+    def enable_aws(self):
+        """Enable AWS Rekognition with default credentials"""
+        if self.video_preview.enable_aws_rekognition(aws_region='ap-south-1'):
+            QMessageBox.information(self, "Success", 
+                "AWS Rekognition enabled successfully.\n\n"
+                "Person detection is now active in the video preview.")
+        else:
+            QMessageBox.warning(self, "Error", 
+                "Failed to enable AWS Rekognition.\n\n"
+                "Please check your AWS credentials configuration.")
 
 def main():
     app = QApplication(sys.argv)
